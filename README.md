@@ -14,7 +14,7 @@ A high-performance request routing layer for distributing LLM inference requests
 
 ## Architecture
 
-
+![Alt text](docs/architecture-diagram.png)
 
 ## Routing Strategies
 
@@ -26,8 +26,6 @@ A high-performance request routing layer for distributing LLM inference requests
 | `prefix_cache` | Consistent hashing on prompt prefix (SHA-256) | Maximizing vLLM KV cache hits |
 
 ## Quick Start
-
-![Alt text](docs/architecture-diagram.png)
 
 ### Local Development (mock backends, no GPU required)
 
