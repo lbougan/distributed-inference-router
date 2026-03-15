@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "inference-router"
+    static_configs:
+      - targets: ["router:8080"]
+        labels:
+          service: "router"
+
+  - job_name: "mock-backends"
+    static_configs:
+      - targets: ["mock-1:8000", "mock-2:8000", "mock-3:8000"]
+        labels:
+          service: "vllm-backend"

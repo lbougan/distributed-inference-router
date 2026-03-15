@@ -1,0 +1,6 @@
+router_url: "http://localhost:8080"
+concurrency: 50
+total_requests: 2000
+rps_limit: 0
+strategy: "round_robin"
+stream: false

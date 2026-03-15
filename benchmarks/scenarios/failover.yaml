@@ -1,0 +1,12 @@
+# Run with one backend killed mid-test to measure failover behavior.
+# Usage:
+#   1. Start the router + mock backends
+#   2. Start the benchmark: python load_test.py --scenario scenarios/failover.yaml --output failover_results.json
+#   3. After ~5 seconds, kill a backend: curl -X POST http://localhost:8001/admin/health -d '{"healthy": false}'
+#   4. Observe how the router reroutes traffic
+router_url: "http://localhost:8080"
+concurrency: 30
+duration_secs: 30
+rps_limit: 100
+strategy: "latency_aware"
+stream: false

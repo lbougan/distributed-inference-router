@@ -1,0 +1,9 @@
+# Overwhelm the router to test backpressure behavior.
+# With high concurrency and no rate limit, the router should start
+# returning 429s once max_in_flight is hit.
+router_url: "http://localhost:8080"
+concurrency: 500
+total_requests: 5000
+rps_limit: 0
+strategy: "least_connections"
+stream: false

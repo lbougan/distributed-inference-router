@@ -1,0 +1,140 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Request Rate (per backend)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(router_requests_total[1m])",
+          "legendFormat": "{{backend}} ({{status}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "title": "Request Latency p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(router_request_duration_seconds_bucket[1m]))",
+          "legendFormat": "p50 {{backend}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(router_request_duration_seconds_bucket[1m]))",
+          "legendFormat": "p95 {{backend}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(router_request_duration_seconds_bucket[1m]))",
+          "legendFormat": "p99 {{backend}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "Active Connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "router_active_connections",
+          "legendFormat": "{{backend}}"
+        }
+      ]
+    },
+    {
+      "title": "Circuit Breaker State",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "router_circuit_breaker_state",
+          "legendFormat": "{{backend}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "CLOSED", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "HALF_OPEN", "color": "yellow" } } },
+            { "type": "value", "options": { "2": { "text": "OPEN", "color": "red" } } }
+          ]
+        }
+      }
+    },
+    {
+      "title": "Backend Health",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "router_backend_health",
+          "legendFormat": "{{backend}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green" } } }
+          ]
+        }
+      }
+    },
+    {
+      "title": "Rejected Requests",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(router_rejected_requests_total[1m])",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "title": "Backend KV Cache Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "vllm:kv_cache_usage_perc",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit" }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["inference-router"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "title": "Inference Router",
+  "uid": "inference-router",
+  "version": 1
+}

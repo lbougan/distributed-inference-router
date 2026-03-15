@@ -1,0 +1,94 @@
+services:
+  vllm-1:
+    image: vllm/vllm-openai:latest
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - VLLM_HOST=0.0.0.0
+      - VLLM_PORT=8000
+    command: >
+      --model ${MODEL_NAME:-meta-llama/Llama-3.1-8B-Instruct}
+      --host 0.0.0.0
+      --port 8000
+      --enable-prefix-caching
+    ports:
+      - "8001:8000"
+
+  vllm-2:
+    image: vllm/vllm-openai:latest
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - VLLM_HOST=0.0.0.0
+      - VLLM_PORT=8000
+    command: >
+      --model ${MODEL_NAME:-meta-llama/Llama-3.1-8B-Instruct}
+      --host 0.0.0.0
+      --port 8000
+      --enable-prefix-caching
+    ports:
+      - "8002:8000"
+
+  vllm-3:
+    image: vllm/vllm-openai:latest
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - VLLM_HOST=0.0.0.0
+      - VLLM_PORT=8000
+    command: >
+      --model ${MODEL_NAME:-meta-llama/Llama-3.1-8B-Instruct}
+      --host 0.0.0.0
+      --port 8000
+      --enable-prefix-caching
+    ports:
+      - "8003:8000"
+
+  router:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.router
+    volumes:
+      - ./router-config-gpu.yaml:/etc/inference-router/config.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - vllm-1
+      - vllm-2
+      - vllm-3
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus

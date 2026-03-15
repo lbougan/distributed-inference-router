@@ -1,0 +1,35 @@
+listen:
+  host: "0.0.0.0"
+  port: 8080
+
+routing:
+  strategy: "latency_aware"
+  prefix_cache:
+    prefix_token_count: 256
+
+backends:
+  - url: "http://vllm-1:8000"
+    weight: 1
+  - url: "http://vllm-2:8000"
+    weight: 1
+  - url: "http://vllm-3:8000"
+    weight: 1
+
+health_check:
+  interval_secs: 5
+  unhealthy_threshold: 3
+  healthy_threshold: 2
+
+circuit_breaker:
+  failure_rate_threshold: 0.5
+  min_requests: 5
+  window_secs: 60
+  open_duration_secs: 30
+
+backpressure:
+  max_in_flight: 1000
+  max_backend_queue_depth: 50
+
+metrics:
+  enabled: true
+  path: "/metrics"

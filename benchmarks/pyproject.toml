@@ -1,0 +1,11 @@
+[project]
+name = "inference-router-benchmarks"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8.0",
+    "numpy>=1.26.0",
+    "rich>=13.0.0",
+]
