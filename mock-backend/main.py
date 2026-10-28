@@ -58,9 +58,26 @@ class CompletionRequest(BaseModel):
 
 
 SAMPLE_TOKENS = [
-    "The", " answer", " to", " your", " question", " is", " that",
-    " large", " language", " models", " work", " by", " predicting",
-    " the", " next", " token", " in", " a", " sequence", ".",
+    "The",
+    " answer",
+    " to",
+    " your",
+    " question",
+    " is",
+    " that",
+    " large",
+    " language",
+    " models",
+    " work",
+    " by",
+    " predicting",
+    " the",
+    " next",
+    " token",
+    " in",
+    " a",
+    " sequence",
+    ".",
 ]
 
 
@@ -76,11 +93,13 @@ def make_completion_response(request_id: str, tokens: list[str], is_chat: bool) 
             "object": "chat.completion",
             "created": int(time.time()),
             "model": "mock-model",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop",
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
             "usage": {
                 "prompt_tokens": 10,
                 "completion_tokens": len(tokens),
@@ -92,11 +111,13 @@ def make_completion_response(request_id: str, tokens: list[str], is_chat: bool) 
         "object": "text_completion",
         "created": int(time.time()),
         "model": "mock-model",
-        "choices": [{
-            "index": 0,
-            "text": text,
-            "finish_reason": "stop",
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "text": text,
+                "finish_reason": "stop",
+            }
+        ],
         "usage": {
             "prompt_tokens": 10,
             "completion_tokens": len(tokens),
@@ -112,11 +133,13 @@ def make_stream_chunk(request_id: str, token: str, is_chat: bool, finish: bool =
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": "mock-model",
-            "choices": [{
-                "index": 0,
-                "delta": {"content": token} if not finish else {},
-                "finish_reason": "stop" if finish else None,
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": token} if not finish else {},
+                    "finish_reason": "stop" if finish else None,
+                }
+            ],
         }
     else:
         chunk = {
@@ -124,11 +147,13 @@ def make_stream_chunk(request_id: str, token: str, is_chat: bool, finish: bool =
             "object": "text_completion",
             "created": int(time.time()),
             "model": "mock-model",
-            "choices": [{
-                "index": 0,
-                "text": token if not finish else "",
-                "finish_reason": "stop" if finish else None,
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "text": token if not finish else "",
+                    "finish_reason": "stop" if finish else None,
+                }
+            ],
         }
     return f"data: {json.dumps(chunk)}\n\n"
 
@@ -146,6 +171,7 @@ async def generate_stream(request_id: str, is_chat: bool):
 async def handle_completion(req: CompletionRequest, is_chat: bool):
     if random.random() < FAIL_RATE:
         from fastapi.responses import JSONResponse
+
         return JSONResponse(status_code=500, content={"error": "simulated failure"})
 
     request_id = f"cmpl-{uuid.uuid4().hex[:12]}"
@@ -176,6 +202,7 @@ async def handle_completion(req: CompletionRequest, is_chat: bool):
 
         resp = make_completion_response(request_id, tokens, is_chat)
         from fastapi.responses import JSONResponse
+
         return JSONResponse(
             content=resp,
             headers={"X-Backend-ID": INSTANCE_ID},
@@ -199,6 +226,7 @@ async def health():
     if state["healthy"]:
         return {"status": "ok"}
     from fastapi.responses import JSONResponse
+
     return JSONResponse(status_code=503, content={"status": "unhealthy"})
 
 

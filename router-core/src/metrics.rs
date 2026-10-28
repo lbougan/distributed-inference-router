@@ -46,10 +46,9 @@ impl RouterMetrics {
             requests_total.clone(),
         );
 
-        let request_duration =
-            Family::<BackendLabels, Histogram>::new_with_constructor(|| {
-                Histogram::new(exponential_buckets(0.001, 2.0, 15))
-            });
+        let request_duration = Family::<BackendLabels, Histogram>::new_with_constructor(|| {
+            Histogram::new(exponential_buckets(0.001, 2.0, 15))
+        });
         registry.register(
             "router_request_duration_seconds",
             "Request duration in seconds",

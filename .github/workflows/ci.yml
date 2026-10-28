@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: router-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: router-core
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -m "not docker" -q || [ $? -eq 5 ]
+
+  compose-smoke:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f deploy/docker-compose.mock.yml up -d --build
+      - name: wait for router
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8080/health && exit 0
+            sleep 2
+          done
+          docker compose -f deploy/docker-compose.mock.yml logs router
+          exit 1
+      - run: |
+          curl -fsS http://localhost:8080/v1/chat/completions \
+            -H 'content-type: application/json' \
+            -d '{"model":"mock-model","messages":[{"role":"user","content":"hi"}],"max_tokens":8}'
+      - if: always()
+        run: docker compose -f deploy/docker-compose.mock.yml down -v

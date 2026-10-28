@@ -12,7 +12,11 @@ pub async fn forward_request(
     original: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
     let method = original.method().clone();
-    let path = original.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path = original
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
     let url = format!("{}{}", backend.url, path);
 
     let headers = original.headers().clone();
@@ -21,9 +25,7 @@ pub async fn forward_request(
         Err(_) => return Err(StatusCode::BAD_REQUEST),
     };
 
-    let mut req_builder = client
-        .request(method, &url)
-        .body(body_bytes.to_vec());
+    let mut req_builder = client.request(method, &url).body(body_bytes.to_vec());
 
     for (key, value) in headers.iter() {
         if key == "host" {
@@ -61,7 +63,9 @@ pub async fn forward_request(
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
         });
         let body = Body::from_stream(stream);
-        response_builder.body(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        response_builder
+            .body(body)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
     } else {
         let body_bytes = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
         response_builder

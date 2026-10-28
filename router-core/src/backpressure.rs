@@ -33,10 +33,6 @@ impl BackpressureController {
     pub fn release(&self) {
         self.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
-
-    pub fn current(&self) -> usize {
-        self.in_flight.load(Ordering::Relaxed)
-    }
 }
 
 #[cfg(test)]
@@ -58,16 +54,5 @@ mod tests {
         assert!(!bp.try_acquire());
         bp.release();
         assert!(bp.try_acquire());
-    }
-
-    #[test]
-    fn tracks_current() {
-        let bp = BackpressureController::new(10);
-        assert_eq!(bp.current(), 0);
-        bp.try_acquire();
-        bp.try_acquire();
-        assert_eq!(bp.current(), 2);
-        bp.release();
-        assert_eq!(bp.current(), 1);
     }
 }

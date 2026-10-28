@@ -52,7 +52,10 @@ mod tests {
     async fn cycles_through_backends() {
         let strategy = RoundRobin::new();
         let pool = make_pool(3);
-        let req = IncomingRequest { path: "/v1/completions".into(), body: None };
+        let req = IncomingRequest {
+            path: "/v1/completions".into(),
+            body: None,
+        };
 
         let mut ids = Vec::new();
         for _ in 0..9 {
@@ -67,7 +70,10 @@ mod tests {
         let pool = make_pool(3);
         pool.backends[1].mark_unhealthy();
 
-        let req = IncomingRequest { path: "/v1/completions".into(), body: None };
+        let req = IncomingRequest {
+            path: "/v1/completions".into(),
+            body: None,
+        };
         let mut ids = Vec::new();
         for _ in 0..4 {
             ids.push(strategy.select_backend(&req, &pool).await.unwrap());
@@ -82,7 +88,10 @@ mod tests {
         pool.backends[0].mark_unhealthy();
         pool.backends[1].mark_unhealthy();
 
-        let req = IncomingRequest { path: "/v1/completions".into(), body: None };
+        let req = IncomingRequest {
+            path: "/v1/completions".into(),
+            body: None,
+        };
         assert!(strategy.select_backend(&req, &pool).await.is_none());
     }
 }

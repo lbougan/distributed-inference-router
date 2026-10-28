@@ -8,10 +8,11 @@ Run with: pytest tests/failover/ -v -s
 """
 
 import asyncio
-import time
 
 import aiohttp
 import pytest
+
+pytestmark = pytest.mark.docker
 
 ROUTER_URL = "http://localhost:8080"
 MOCK_URLS = [
@@ -29,14 +30,7 @@ def make_chat_request() -> dict:
     }
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def session():
     async with aiohttp.ClientSession() as s:
         yield s
@@ -79,7 +73,7 @@ class TestFailover:
                         success += 1
                         backend = resp.headers.get("X-Backend-ID", "")
                         backends_seen.add(backend)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
         # Restore health
@@ -108,7 +102,7 @@ class TestFailover:
                     if resp.status == 200:
                         backend = resp.headers.get("X-Backend-ID", "")
                         backends_seen.add(backend)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
         assert "mock-2" in backends_seen, "Recovered backend should re-enter rotation"
@@ -149,7 +143,7 @@ class TestCircuitBreaker:
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     pass
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
         # Check metrics for circuit breaker state

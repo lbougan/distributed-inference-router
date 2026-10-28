@@ -51,8 +51,14 @@ def plot_latency_comparison(all_stats: dict[str, dict], output: Path):
         values = [all_stats[s].get(pctl, 0) for s in strategies]
         bars = ax.bar(x + i * width, values, width, label=pctl)
         for bar, val in zip(bars, values):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                    f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.5,
+                f"{val:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
 
     ax.set_xlabel("Routing Strategy")
     ax.set_ylabel("Latency (ms)")
@@ -74,8 +80,13 @@ def plot_throughput_comparison(all_stats: dict[str, dict], output: Path):
     fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.bar(strategies, throughputs, color=["#2196F3", "#4CAF50", "#FF9800", "#9C27B0"])
     for bar, val in zip(bars, throughputs):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
-                f"{val:.1f}", ha="center", va="bottom")
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 1,
+            f"{val:.1f}",
+            ha="center",
+            va="bottom",
+        )
 
     ax.set_xlabel("Routing Strategy")
     ax.set_ylabel("Throughput (req/s)")
@@ -99,8 +110,18 @@ def plot_latency_distribution(all_results: dict[str, list[dict]], output: Path):
             continue
         ax = axes[idx]
         ax.hist(latencies, bins=50, alpha=0.7, edgecolor="black", linewidth=0.5)
-        ax.axvline(np.percentile(latencies, 99), color="red", linestyle="--", label=f"p99={np.percentile(latencies, 99):.1f}ms")
-        ax.axvline(np.percentile(latencies, 50), color="green", linestyle="--", label=f"p50={np.percentile(latencies, 50):.1f}ms")
+        ax.axvline(
+            np.percentile(latencies, 99),
+            color="red",
+            linestyle="--",
+            label=f"p99={np.percentile(latencies, 99):.1f}ms",
+        )
+        ax.axvline(
+            np.percentile(latencies, 50),
+            color="green",
+            linestyle="--",
+            label=f"p50={np.percentile(latencies, 50):.1f}ms",
+        )
         ax.set_title(strategy)
         ax.set_xlabel("Latency (ms)")
         ax.set_ylabel("Count")
@@ -117,8 +138,12 @@ def plot_latency_distribution(all_results: dict[str, list[dict]], output: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze benchmark results")
-    parser.add_argument("files", nargs="+", type=Path, help="Result JSON files (named strategy_results.json)")
-    parser.add_argument("--output", type=Path, default=Path("plots"), help="Output directory for plots")
+    parser.add_argument(
+        "files", nargs="+", type=Path, help="Result JSON files (named strategy_results.json)"
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("plots"), help="Output directory for plots"
+    )
     args = parser.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -135,13 +160,17 @@ def main():
         all_stats[strategy] = compute_stats(results)
 
     print("\nStrategy Comparison:")
-    print(f"{'Strategy':<20} {'Count':>8} {'Errors':>8} {'p50':>10} {'p95':>10} {'p99':>10} {'Throughput':>12}")
+    print(
+        f"{'Strategy':<20} {'Count':>8} {'Errors':>8} {'p50':>10} {'p95':>10} {'p99':>10} {'Throughput':>12}"
+    )
     print("-" * 80)
     for name, stats in all_stats.items():
         if stats["count"] == 0:
             print(f"{name:<20} {'no data':>8}")
             continue
-        print(f"{name:<20} {stats['count']:>8} {stats['errors']:>8} {stats['p50']:>10.2f} {stats['p95']:>10.2f} {stats['p99']:>10.2f} {stats['throughput']:>10.1f}/s")
+        print(
+            f"{name:<20} {stats['count']:>8} {stats['errors']:>8} {stats['p50']:>10.2f} {stats['p95']:>10.2f} {stats['p99']:>10.2f} {stats['throughput']:>10.1f}/s"
+        )
 
     if len(all_stats) >= 1:
         plot_latency_comparison(all_stats, args.output)

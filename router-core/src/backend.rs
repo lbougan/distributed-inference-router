@@ -54,7 +54,8 @@ impl Backend {
 
     pub fn mark_unhealthy(&self) {
         self.healthy.store(false, Ordering::Relaxed);
-        self.consecutive_health_successes.store(0, Ordering::Relaxed);
+        self.consecutive_health_successes
+            .store(0, Ordering::Relaxed);
     }
 
     pub fn record_request_start(&self) {

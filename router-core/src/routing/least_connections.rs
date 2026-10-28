@@ -41,11 +41,20 @@ mod tests {
         let strategy = LeastConnections;
         let pool = make_pool(3);
 
-        pool.backends[0].active_connections.store(5, Ordering::Relaxed);
-        pool.backends[1].active_connections.store(2, Ordering::Relaxed);
-        pool.backends[2].active_connections.store(8, Ordering::Relaxed);
+        pool.backends[0]
+            .active_connections
+            .store(5, Ordering::Relaxed);
+        pool.backends[1]
+            .active_connections
+            .store(2, Ordering::Relaxed);
+        pool.backends[2]
+            .active_connections
+            .store(8, Ordering::Relaxed);
 
-        let req = IncomingRequest { path: "/v1/completions".into(), body: None };
+        let req = IncomingRequest {
+            path: "/v1/completions".into(),
+            body: None,
+        };
         let id = strategy.select_backend(&req, &pool).await.unwrap();
         assert_eq!(id, 1);
     }
@@ -55,12 +64,21 @@ mod tests {
         let strategy = LeastConnections;
         let pool = make_pool(3);
 
-        pool.backends[0].active_connections.store(10, Ordering::Relaxed);
-        pool.backends[1].active_connections.store(1, Ordering::Relaxed);
+        pool.backends[0]
+            .active_connections
+            .store(10, Ordering::Relaxed);
+        pool.backends[1]
+            .active_connections
+            .store(1, Ordering::Relaxed);
         pool.backends[1].mark_unhealthy();
-        pool.backends[2].active_connections.store(5, Ordering::Relaxed);
+        pool.backends[2]
+            .active_connections
+            .store(5, Ordering::Relaxed);
 
-        let req = IncomingRequest { path: "/v1/completions".into(), body: None };
+        let req = IncomingRequest {
+            path: "/v1/completions".into(),
+            body: None,
+        };
         let id = strategy.select_backend(&req, &pool).await.unwrap();
         assert_eq!(id, 2);
     }

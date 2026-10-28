@@ -141,6 +141,9 @@ mod tests {
                 seen.insert(id);
             }
         }
-        assert!(seen.len() > 1, "different prefixes should spread across backends");
+        assert!(
+            seen.len() > 1,
+            "different prefixes should spread across backends"
+        );
     }
 }

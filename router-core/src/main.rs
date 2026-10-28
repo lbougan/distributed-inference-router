@@ -23,7 +23,10 @@ use metrics::RouterMetrics;
 use server::AppState;
 
 #[derive(Parser)]
-#[command(name = "inference-router", about = "Distributed LLM inference request router")]
+#[command(
+    name = "inference-router",
+    about = "Distributed LLM inference request router"
+)]
 struct Cli {
     /// Path to the configuration YAML file
     #[arg(short, long, default_value = "config.yaml")]
@@ -34,8 +37,7 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("inference_router=info".parse()?),
+            EnvFilter::from_default_env().add_directive("inference_router=info".parse()?),
         )
         .json()
         .init();
@@ -103,8 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let app = server::build_router(state);
-    let addr: SocketAddr =
-        format!("{}:{}", config.listen.host, config.listen.port).parse()?;
+    let addr: SocketAddr = format!("{}:{}", config.listen.host, config.listen.port).parse()?;
     tracing::info!(%addr, "Listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

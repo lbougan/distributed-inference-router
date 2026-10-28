@@ -51,10 +51,8 @@ impl RoutingStrategy for LatencyAware {
         }
 
         // Weighted random: inverse latency -> lower latency = higher weight
-        let weights: Vec<(BackendId, f64)> = latencies
-            .iter()
-            .map(|(id, lat)| (*id, 1.0 / lat))
-            .collect();
+        let weights: Vec<(BackendId, f64)> =
+            latencies.iter().map(|(id, lat)| (*id, 1.0 / lat)).collect();
 
         let total_weight: f64 = weights.iter().map(|(_, w)| w).sum();
         let mut rng = rand::thread_rng();
@@ -97,11 +95,20 @@ mod tests {
         let pool = make_pool(3);
 
         // Backend 0: high latency, Backend 1: low latency, Backend 2: medium
-        pool.backends[0].ewma_latency_us.store(10000, Ordering::Relaxed);
-        pool.backends[1].ewma_latency_us.store(100, Ordering::Relaxed);
-        pool.backends[2].ewma_latency_us.store(5000, Ordering::Relaxed);
+        pool.backends[0]
+            .ewma_latency_us
+            .store(10000, Ordering::Relaxed);
+        pool.backends[1]
+            .ewma_latency_us
+            .store(100, Ordering::Relaxed);
+        pool.backends[2]
+            .ewma_latency_us
+            .store(5000, Ordering::Relaxed);
 
-        let req = IncomingRequest { path: "/v1/completions".into(), body: None };
+        let req = IncomingRequest {
+            path: "/v1/completions".into(),
+            body: None,
+        };
 
         let mut counts = [0u32; 3];
         for _ in 0..1000 {
@@ -110,7 +117,13 @@ mod tests {
         }
 
         // Backend 1 (lowest latency) should be picked most often
-        assert!(counts[1] > counts[0], "low-latency backend should be preferred");
-        assert!(counts[1] > counts[2], "low-latency backend should be preferred");
+        assert!(
+            counts[1] > counts[0],
+            "low-latency backend should be preferred"
+        );
+        assert!(
+            counts[1] > counts[2],
+            "low-latency backend should be preferred"
+        );
     }
 }

@@ -7,10 +7,11 @@ Run with: pytest tests/integration/ -v
 """
 
 import asyncio
-import time
 
 import aiohttp
 import pytest
+
+pytestmark = pytest.mark.docker
 
 ROUTER_URL = "http://localhost:8080"
 MOCK_URLS = [
@@ -29,14 +30,7 @@ def make_chat_request(prompt: str = "Hello", stream: bool = False) -> dict:
     }
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def session():
     async with aiohttp.ClientSession() as s:
         yield s

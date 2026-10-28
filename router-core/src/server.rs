@@ -43,11 +43,11 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
         let labels = BackendLabels {
             backend: backend.url.clone(),
         };
-        state
-            .metrics
-            .active_connections
-            .get_or_create(&labels)
-            .set(backend.active_connections.load(std::sync::atomic::Ordering::Relaxed) as i64);
+        state.metrics.active_connections.get_or_create(&labels).set(
+            backend
+                .active_connections
+                .load(std::sync::atomic::Ordering::Relaxed) as i64,
+        );
 
         state
             .metrics
@@ -95,10 +95,7 @@ async fn proxy_handler(
         body: body_json,
     };
 
-    let backend_id = state
-        .strategy
-        .select_backend(&incoming, &state.pool)
-        .await;
+    let backend_id = state.strategy.select_backend(&incoming, &state.pool).await;
 
     let backend_id = match backend_id {
         Some(id) => id,

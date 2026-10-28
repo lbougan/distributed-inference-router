@@ -1,7 +1,7 @@
-pub mod round_robin;
-pub mod least_connections;
 pub mod latency_aware;
+pub mod least_connections;
 pub mod prefix_cache;
+pub mod round_robin;
 
 use async_trait::async_trait;
 use std::time::Duration;
@@ -35,7 +35,10 @@ pub fn create_strategy(name: &str, prefix_token_count: usize) -> Box<dyn Routing
         "latency_aware" => Box::new(latency_aware::LatencyAware::new(0.3)),
         "prefix_cache" => Box::new(prefix_cache::PrefixCacheAware::new(prefix_token_count)),
         _ => {
-            tracing::warn!(strategy = name, "Unknown strategy, falling back to round_robin");
+            tracing::warn!(
+                strategy = name,
+                "Unknown strategy, falling back to round_robin"
+            );
             Box::new(round_robin::RoundRobin::new())
         }
     }
