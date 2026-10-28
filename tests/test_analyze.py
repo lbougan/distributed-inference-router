@@ -52,7 +52,9 @@ def test_markdown_table_has_one_row_per_run():
     lines = table.strip().splitlines()
     assert lines[0].startswith("| scenario | strategy |")
     assert len(lines) == 4  # header, separator, 2 rows
+    assert lines[0].endswith("| prefix hit |")
     assert "| baseline | round_robin |" in lines[2]
+    assert lines[2].endswith("| - |")
 
 
 def test_update_readme_replaces_only_the_marked_block(tmp_path: Path):

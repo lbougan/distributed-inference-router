@@ -111,14 +111,16 @@ async def send_request(
 
 
 async def rate_limit_refiller(rate_limiter: asyncio.Semaphore, rps: float):
-    """Refills the rate limiter at the configured RPS."""
-    interval = 1.0 / rps
+    """Token bucket: refills the rate limiter at the configured RPS."""
+    last = time.monotonic()
     while True:
-        await asyncio.sleep(interval)
-        try:
-            rate_limiter.release()
-        except ValueError:
-            pass
+        await asyncio.sleep(0.05)
+        now = time.monotonic()
+        tokens = min(int(rps * (now - last)), int(rps))
+        if tokens > 0:
+            for _ in range(tokens):
+                rate_limiter.release()
+            last = now
 
 
 async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:

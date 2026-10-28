@@ -53,6 +53,7 @@ SCENARIOS = [
             "least_load",
             "latency_aware",
             "prefix_cache",
+            "direct",  # same load straight at mock-2, no router: the router-overhead reference
         ),
         load={"concurrency": 50, "total_requests": 2000},
     ),
@@ -123,8 +124,8 @@ async def set_mock_health(session: aiohttp.ClientSession, url: str, healthy: boo
         resp.raise_for_status()
 
 
-async def mock_prefix_hit_rates(session: aiohttp.ClientSession) -> dict[str, float]:
-    rates = {}
+async def mock_prefix_counters(session: aiohttp.ClientSession) -> dict[str, tuple[float, float]]:
+    counters = {}
     for url in MOCK_URLS:
         async with session.get(f"{url}/metrics") as resp:
             text = await resp.text()
@@ -134,22 +135,33 @@ async def mock_prefix_hit_rates(session: aiohttp.ClientSession) -> dict[str, flo
                 hits = float(line.split()[-1])
             elif line.startswith("vllm:prefix_cache_queries{"):
                 queries = float(line.split()[-1])
-        rates[url] = hits / queries if queries else 0.0
-    return rates
+        counters[url] = (hits, queries)
+    return counters
 
 
 async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
-    config_path = REPO / "benchmarks" / f".router-config.{scenario.name}.{strategy}.yaml"
-    config_path.write_text(yaml.safe_dump(router_config(strategy, scenario.router)))
-    restart_router(config_path)
+    direct = strategy == "direct"
+    if not direct:
+        config_path = REPO / "benchmarks" / f".router-config.{scenario.name}.{strategy}.yaml"
+        config_path.write_text(yaml.safe_dump(router_config(strategy, scenario.router)))
+        restart_router(config_path)
 
     async with aiohttp.ClientSession() as session:
-        await wait_healthy(session, ROUTER_URL)
+        if not direct:
+            await wait_healthy(session, ROUTER_URL)
         for url in MOCK_URLS:
             await set_mock_health(session, url, True)
-        await asyncio.sleep(5)  # two health intervals so every backend is routable
+        if not direct:
+            await asyncio.sleep(5)  # two health intervals so every backend is routable
 
-        bench = BenchmarkConfig(router_url=ROUTER_URL, strategy=strategy, **scenario.load)
+        # Note: absolute p50s sit below the mocks' base latency because repeated prompts hit
+        # the mock's prefix cache (~40% faster). That is also why baseline/round_robin p50 is
+        # ~40 ms rather than 60 ms. Compare baseline/round_robin against this direct row.
+        bench = BenchmarkConfig(
+            router_url=MOCK_URLS[1] if direct else ROUTER_URL,
+            strategy="direct_mock-2" if direct else strategy,
+            **scenario.load,
+        )
         chaos = None
         if scenario.kill_backend_at is not None:
 
@@ -164,20 +176,23 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
 
             chaos = asyncio.create_task(chaos_task())
 
-        before = await mock_prefix_hit_rates(session)
+        before = await mock_prefix_counters(session)
         results = await run_benchmark(bench)
         if chaos:
             await chaos
-        after = await mock_prefix_hit_rates(session)
+        after = await mock_prefix_counters(session)
         await set_mock_health(session, MOCK_URLS[0], True)
 
+    deltas = {u: (after[u][0] - before[u][0], after[u][1] - before[u][1]) for u in MOCK_URLS}
+    total_q = sum(q for _, q in deltas.values())
     meta = {
         "scenario": scenario.name,
-        "strategy": strategy,
+        "strategy": "direct_mock-2" if direct else strategy,
         "repeat": repeat,
         "load": scenario.load,
         "router": scenario.router,
-        "prefix_hit_rate_delta": {u: after[u] - before[u] for u in MOCK_URLS},
+        "prefix_hit_rate": {u: (h / q if q else 0.0) for u, (h, q) in deltas.items()},
+        "prefix_hit_rate_total": (sum(h for h, _ in deltas.values()) / total_q if total_q else 0.0),
         "router_commit": subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=False
         ).stdout.strip(),

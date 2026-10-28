@@ -71,8 +71,8 @@ def compute_stats(results: list[dict]) -> dict:
 
 def markdown_table(runs: list[dict]) -> str:
     header = (
-        "| scenario | strategy | ok | 429 | 5xx | p50 ms | p95 ms | p99 ms | req/s | backend share |\n"
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n"
+        "| scenario | strategy | ok | 429 | 5xx | p50 ms | p95 ms | p99 ms | req/s | backend share | prefix hit |\n"
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|\n"
     )
     rows = []
     for run in runs:
@@ -80,10 +80,12 @@ def markdown_table(runs: list[dict]) -> str:
         share = ", ".join(
             f"{k.rsplit('/', 1)[-1].split(':')[0]} {v:.0%}" for k, v in s["backend_share"].items()
         )
+        phr = run["meta"].get("prefix_hit_rate_total")
+        hit = f"{phr:.0%}" if phr is not None else "-"
         rows.append(
             f"| {run['meta'].get('scenario', '?')} | {run['meta'].get('strategy', '?')} | {s['count']} "
             f"| {s['rejected_429']} | {s['errors_5xx']} | {s['p50']:.1f} | {s['p95']:.1f} | {s['p99']:.1f} "
-            f"| {s['throughput']:.0f} | {share} |"
+            f"| {s['throughput']:.0f} | {share} | {hit} |"
         )
     return header + "\n".join(rows) + "\n"
 
