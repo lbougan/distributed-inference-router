@@ -24,20 +24,29 @@ impl Default for RoundRobin {
 
 impl RoutingStrategy for RoundRobin {
     fn select(&self, _request: &IncomingRequest, routable: &[Arc<Backend>]) -> Option<BackendId> {
-        let total: u64 = routable.iter().map(|b| u64::from(b.weight.max(1))).sum();
+        let total = total_weight(routable);
         if total == 0 {
             return None;
         }
-        let mut slot = (self.counter.fetch_add(1, Ordering::Relaxed) as u64) % total;
-        for b in routable {
-            let w = u64::from(b.weight.max(1));
-            if slot < w {
-                return Some(b.id);
-            }
-            slot -= w;
-        }
-        None
+        let slot = (self.counter.fetch_add(1, Ordering::Relaxed) as u64) % total;
+        weighted_pick(slot, routable)
     }
+}
+
+pub(crate) fn total_weight(routable: &[Arc<Backend>]) -> u64 {
+    routable.iter().map(|b| u64::from(b.weight.max(1))).sum()
+}
+
+/// Map a slot in `0..total_weight` to the backend owning it (each gets `weight` slots).
+pub(crate) fn weighted_pick(mut slot: u64, routable: &[Arc<Backend>]) -> Option<BackendId> {
+    for b in routable {
+        let w = u64::from(b.weight.max(1));
+        if slot < w {
+            return Some(b.id);
+        }
+        slot -= w;
+    }
+    None
 }
 
 #[cfg(test)]

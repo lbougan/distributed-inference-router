@@ -127,6 +127,21 @@
       "fieldConfig": {
         "defaults": { "unit": "percentunit" }
       }
+    },
+    {
+      "title": "Backend queue depth (scraped)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "router_backend_queue_depth",
+          "legendFormat": "{{backend}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
     }
   ],
   "schemaVersion": 39,

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rand::Rng;
 
+use super::round_robin;
 use super::{IncomingRequest, RoutingStrategy};
 use crate::backend::{Backend, BackendId};
 
@@ -39,6 +40,7 @@ impl RoutingStrategy for LatencyAware {
             .map(|b| b.ewma_latency_us.load(Ordering::Relaxed))
             .collect();
         // Backends without a sample get the median sampled latency, not a tiny one.
+        // With an even count we take the upper median (index len/2): the conservative choice.
         let mut sampled: Vec<f64> = raw.iter().filter(|l| **l > 0).map(|l| *l as f64).collect();
         sampled.sort_by(f64::total_cmp);
         let median = if sampled.is_empty() {
@@ -54,8 +56,9 @@ impl RoutingStrategy for LatencyAware {
         let max = latencies.iter().cloned().fold(f64::MIN, f64::max);
 
         if max <= min * FLAT_RATIO {
-            let idx = self.fallback_counter.fetch_add(1, Ordering::Relaxed) % routable.len();
-            return Some(routable[idx].id);
+            let slot = self.fallback_counter.fetch_add(1, Ordering::Relaxed) as u64
+                % round_robin::total_weight(routable);
+            return round_robin::weighted_pick(slot, routable);
         }
 
         let weights: Vec<f64> = routable
@@ -148,5 +151,41 @@ mod tests {
             .count();
         let share = hits2 as f64 / n as f64;
         assert!((share - 1.0 / 3.0).abs() < 0.05, "unsampled share {share}");
+    }
+
+    fn weighted(id: usize, weight: u32) -> Arc<Backend> {
+        Arc::new(Backend::new(
+            id,
+            format!("http://b{id}"),
+            weight,
+            crate::circuit_breaker::CircuitBreaker::default(),
+        ))
+    }
+
+    #[test]
+    fn flat_latencies_respect_weights() {
+        let strategy = LatencyAware::new();
+        let b = vec![weighted(0, 3), weighted(1, 1)];
+        let ids: Vec<usize> = (0..8)
+            .map(|_| strategy.select(&req(), &b).unwrap())
+            .collect();
+        assert_eq!(ids.iter().filter(|i| **i == 0).count(), 6);
+        assert_eq!(ids.iter().filter(|i| **i == 1).count(), 2);
+    }
+
+    #[test]
+    fn weighted_path_with_one_unsampled_backend() {
+        let strategy = LatencyAware::new();
+        let b = vec![weighted(0, 1), weighted(1, 1), weighted(2, 1)];
+        b[0].ewma_latency_us.store(100_000, Ordering::Relaxed);
+        b[1].ewma_latency_us.store(300_000, Ordering::Relaxed);
+        // b[2] unsampled: upper median of [100k, 300k] is 300k, same as b[1].
+        let n = 20_000;
+        let mut counts = [0usize; 3];
+        for _ in 0..n {
+            counts[strategy.select(&req(), &b).unwrap()] += 1;
+        }
+        let share = |i: usize| counts[i] as f64 / n as f64;
+        assert!((share(2) - share(1)).abs() < 0.03, "{counts:?}");
     }
 }

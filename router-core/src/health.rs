@@ -18,6 +18,7 @@ pub fn spawn_health_checker(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(config.interval_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             join_all(
@@ -41,17 +42,48 @@ async fn check_one(backend: Arc<Backend>, client: reqwest::Client, config: &Heal
         Err(_) => false,
     };
     apply_probe_result(&backend, healthy, config);
+    if !healthy {
+        reset_scraped(&backend);
+        return;
+    }
 
-    if let Ok(resp) = client
+    match client
         .get(format!("{}/metrics", backend.url))
         .timeout(PROBE_TIMEOUT)
         .send()
         .await
     {
-        if let Ok(text) = resp.text().await {
-            parse_backend_metrics(&text, &backend);
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(text) => {
+                apply_scrape(&text, &backend);
+            }
+            Err(e) => {
+                tracing::debug!(backend = %backend.url, error = %e, "metrics body unreadable");
+                reset_scraped(&backend);
+            }
+        },
+        Ok(resp) => {
+            tracing::debug!(backend = %backend.url, status = %resp.status(), "metrics scrape rejected");
+            reset_scraped(&backend);
+        }
+        Err(e) => {
+            tracing::debug!(backend = %backend.url, error = %e, "metrics scrape failed");
+            reset_scraped(&backend);
         }
     }
+}
+
+/// A successful scrape without the queue metric means no queue: clear any old depth.
+fn apply_scrape(text: &str, backend: &Backend) {
+    if !parse_backend_metrics(text, backend) {
+        backend.queue_depth.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Stale scraped values must not keep steering traffic once a scrape stops working.
+fn reset_scraped(backend: &Backend) {
+    backend.queue_depth.store(0, Ordering::Relaxed);
+    backend.kv_cache_usage_bp.store(0, Ordering::Relaxed);
 }
 
 /// Hysteresis: `unhealthy_threshold` consecutive failures mark down,
@@ -91,13 +123,17 @@ fn metric_name(line: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Takes the last whitespace-separated token as the value, so exposition timestamps are not
+/// supported (vLLM emits none).
 fn metric_value(line: &str) -> Option<f64> {
     line.split_whitespace().last()?.parse().ok()
 }
 
 /// Reads `vllm:num_requests_waiting` and `vllm:kv_cache_usage_perc`
 /// (or the pre-0.6 name `vllm:gpu_cache_usage_perc`). Exact-name match only.
-pub fn parse_backend_metrics(text: &str, backend: &Backend) {
+/// Returns whether the queue-depth metric was found.
+pub fn parse_backend_metrics(text: &str, backend: &Backend) -> bool {
+    let mut found_queue = false;
     for line in text.lines() {
         if line.starts_with('#') {
             continue;
@@ -108,6 +144,7 @@ pub fn parse_backend_metrics(text: &str, backend: &Backend) {
                     backend
                         .queue_depth
                         .store(v.max(0.0) as u64, Ordering::Relaxed);
+                    found_queue = true;
                 }
             }
             "vllm:kv_cache_usage_perc" | "vllm:gpu_cache_usage_perc" => {
@@ -120,6 +157,7 @@ pub fn parse_backend_metrics(text: &str, backend: &Backend) {
             _ => {}
         }
     }
+    found_queue
 }
 
 #[cfg(test)]
@@ -141,6 +179,25 @@ mod tests {
         parse_backend_metrics(text, &b);
         assert_eq!(b.queue_depth.load(Ordering::Relaxed), 7);
         assert_eq!(b.kv_cache_usage_bp.load(Ordering::Relaxed), 4321);
+    }
+
+    #[test]
+    fn absent_queue_metric_resets_depth() {
+        let b = backend();
+        b.queue_depth.store(100, Ordering::Relaxed);
+        apply_scrape("vllm:kv_cache_usage_perc 0.2\n", &b);
+        assert_eq!(b.queue_depth.load(Ordering::Relaxed), 0);
+        assert_eq!(b.kv_cache_usage_bp.load(Ordering::Relaxed), 2000);
+    }
+
+    #[test]
+    fn parse_returns_whether_queue_depth_was_found() {
+        let b = backend();
+        assert!(parse_backend_metrics("vllm:num_requests_waiting 3\n", &b));
+        assert!(!parse_backend_metrics(
+            "vllm:num_requests_waiting_total 3\n",
+            &b
+        ));
     }
 
     #[test]

@@ -248,10 +248,41 @@ impl RouterConfig {
                 "circuit_breaker.failure_rate_threshold must be in (0, 1], got {rate}"
             ));
         }
+        const STRATEGIES: [&str; 5] = [
+            "round_robin",
+            "least_connections",
+            "least_load",
+            "latency_aware",
+            "prefix_cache",
+        ];
+        if !STRATEGIES.contains(&self.routing.strategy.as_str()) {
+            return Err(format!(
+                "routing.strategy must be one of {}, got {:?}",
+                STRATEGIES.join(", "),
+                self.routing.strategy
+            ));
+        }
+        if self.health_check.interval_secs < 1 {
+            return Err("health_check.interval_secs must be >= 1".to_string());
+        }
+        let path = &self.metrics.path;
+        if !path.starts_with('/')
+            || ["/health", "/v1/completions", "/v1/chat/completions"].contains(&path.as_str())
+        {
+            return Err(format!(
+                "metrics.path must start with '/' and not collide with a router route, got {path:?}"
+            ));
+        }
         if self.backends.is_empty() {
             return Err("backends must not be empty".to_string());
         }
         for b in &self.backends {
+            if b.weight < 1 {
+                return Err(format!(
+                    "backend {} has weight 0: set weight >= 1; to drain a backend remove it from the list",
+                    b.url
+                ));
+            }
             let scheme_ok = b.url.starts_with("http://") || b.url.starts_with("https://");
             if !scheme_ok || http::HeaderValue::from_str(&b.url).is_err() {
                 return Err(format!(
@@ -361,5 +392,47 @@ mod tests {
                 "{rate}: {err}"
             );
         }
+    }
+
+    fn rejects(extra: &str, needle: &str) {
+        let yaml = format!("listen: {{}}\nrouting: {{}}\nbackends:{ONE_BACKEND}\n{extra}");
+        let err = RouterConfig::from_yaml(&yaml).unwrap_err();
+        assert!(err.to_string().contains(needle), "{extra}: {err}");
+    }
+
+    #[test]
+    fn rejects_zero_health_interval() {
+        rejects("health_check:\n  interval_secs: 0\n", "interval_secs");
+    }
+
+    #[test]
+    fn rejects_bad_metrics_path() {
+        for p in [
+            "metrics",
+            "/health",
+            "/v1/completions",
+            "/v1/chat/completions",
+        ] {
+            rejects(&format!("metrics:\n  path: \"{p}\"\n"), "metrics.path");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_weight() {
+        let yaml =
+            "listen: {}\nrouting: {}\nbackends:\n  - url: \"http://a:8000\"\n    weight: 0\n";
+        let err = RouterConfig::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("weight >= 1"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_strategy() {
+        let yaml =
+            "listen: {}\nrouting:\n  strategy: roundrobin\nbackends:\n  - url: \"http://a:8000\"\n";
+        let err = RouterConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("\"roundrobin\"") && err.contains("least_load"),
+            "{err}"
+        );
     }
 }

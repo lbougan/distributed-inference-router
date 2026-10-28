@@ -106,13 +106,23 @@ impl BackendPool {
     }
 
     pub fn routable(&self) -> Vec<Arc<Backend>> {
-        self.backends
+        let available: Vec<Arc<Backend>> = self
+            .backends
             .iter()
-            .filter(|b| {
-                b.is_routable() && b.queue_depth.load(Ordering::Relaxed) <= self.max_queue_depth
-            })
+            .filter(|b| b.is_routable())
             .cloned()
-            .collect()
+            .collect();
+        let under_limit: Vec<Arc<Backend>> = available
+            .iter()
+            .filter(|b| b.queue_depth.load(Ordering::Relaxed) <= self.max_queue_depth)
+            .cloned()
+            .collect();
+        // Soft limit: if every backend is busy, shed via the in-flight limit, not by refusing.
+        if under_limit.is_empty() {
+            available
+        } else {
+            under_limit
+        }
     }
 
     pub fn get(&self, id: BackendId) -> Option<&Arc<Backend>> {
@@ -162,6 +172,15 @@ mod tests {
         pool.backends[1].queue_depth.store(51, Ordering::Relaxed);
         let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
         assert_eq!(ids, vec![0]);
+    }
+
+    #[test]
+    fn queue_limit_is_soft_when_every_backend_is_over_it() {
+        let pool = BackendPool::new(vec![backend(0), backend(1)], 50);
+        pool.backends[0].queue_depth.store(60, Ordering::Relaxed);
+        pool.backends[1].queue_depth.store(70, Ordering::Relaxed);
+        let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![0, 1]);
     }
 
     #[test]
