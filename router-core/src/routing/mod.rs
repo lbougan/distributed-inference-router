@@ -32,7 +32,7 @@ pub fn create_strategy(name: &str, prefix_token_count: usize) -> Box<dyn Routing
     match name {
         "round_robin" => Box::new(round_robin::RoundRobin::new()),
         "least_connections" => Box::new(least_connections::LeastConnections),
-        "latency_aware" => Box::new(latency_aware::LatencyAware::new(0.3)),
+        "latency_aware" => Box::new(latency_aware::LatencyAware::new()),
         "prefix_cache" => Box::new(prefix_cache::PrefixCacheAware::new(prefix_token_count)),
         _ => {
             tracing::warn!(

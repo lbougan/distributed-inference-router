@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use dashmap::DashMap;
 use rand::Rng;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -7,17 +6,17 @@ use std::time::Duration;
 use super::{IncomingRequest, RoutingStrategy};
 use crate::backend::{BackendId, BackendPool};
 
-pub struct LatencyAware {
-    alpha: f64,
-    ewma_latencies: DashMap<BackendId, f64>,
-}
+pub struct LatencyAware;
 
 impl LatencyAware {
-    pub fn new(alpha: f64) -> Self {
-        Self {
-            alpha,
-            ewma_latencies: DashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for LatencyAware {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -68,12 +67,7 @@ impl RoutingStrategy for LatencyAware {
         Some(weights.last().unwrap().0)
     }
 
-    fn on_request_complete(&self, backend: BackendId, latency: Duration, _success: bool) {
-        let new_us = latency.as_micros() as f64;
-        let mut entry = self.ewma_latencies.entry(backend).or_insert(new_us);
-        let old = *entry.value();
-        *entry.value_mut() = self.alpha * new_us + (1.0 - self.alpha) * old;
-    }
+    fn on_request_complete(&self, _backend: BackendId, _latency: Duration, _success: bool) {}
 }
 
 #[cfg(test)]
@@ -91,7 +85,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefers_lower_latency_backend() {
-        let strategy = LatencyAware::new(0.3);
+        let strategy = LatencyAware::new();
         let pool = make_pool(3);
 
         // Backend 0: high latency, Backend 1: low latency, Backend 2: medium

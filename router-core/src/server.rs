@@ -10,7 +10,7 @@ use crate::backend::BackendPool;
 use crate::backpressure::BackpressureController;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::metrics::{BackendLabels, RejectLabels, RequestLabels, RouterMetrics};
-use crate::proxy::forward_request;
+use crate::proxy::{forward_request, Forwarded, ForwardedBody, MAX_BODY_BYTES};
 use crate::routing::{IncomingRequest, RoutingStrategy};
 
 #[derive(Clone)]
@@ -22,6 +22,7 @@ pub struct AppState {
     pub circuit_breakers: Arc<Vec<CircuitBreaker>>,
     pub backpressure: Arc<BackpressureController>,
     pub metrics: RouterMetrics,
+    pub ewma_alpha: f64,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -67,102 +68,89 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
     state.metrics.encode()
 }
 
+fn inc_rejected(state: &AppState, reason: &str) {
+    state
+        .metrics
+        .rejected_requests
+        .get_or_create(&RejectLabels {
+            reason: reason.to_string(),
+        })
+        .inc();
+}
+
+fn into_response(forwarded: Forwarded, backend_url: &str) -> Response<Body> {
+    let mut builder = Response::builder().status(forwarded.status);
+    if let Some(h) = builder.headers_mut() {
+        *h = forwarded.headers;
+    }
+    builder = builder.header("x-router-backend", backend_url);
+    let body = match forwarded.body {
+        ForwardedBody::Full(bytes) => Body::from(bytes),
+        ForwardedBody::Stream(stream) => Body::from_stream(stream),
+    };
+    builder.body(body).expect("response from valid parts")
+}
+
 async fn proxy_handler(
     State(state): State<AppState>,
     req: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    if !state.backpressure.try_acquire() {
-        state
-            .metrics
-            .rejected_requests
-            .get_or_create(&RejectLabels {
-                reason: "backpressure".to_string(),
-            })
-            .inc();
+    let Some(_permit) = state.backpressure.try_acquire() else {
+        inc_rejected(&state, "backpressure");
         return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
+    };
 
-    let path = req.uri().path().to_string();
-
-    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+    let (parts, body) = req.into_parts();
+    let body_bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let body_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
-
     let incoming = IncomingRequest {
-        path: path.clone(),
-        body: body_json,
+        path: parts.uri.path().to_string(),
+        body: serde_json::from_slice(&body_bytes).ok(),
     };
 
-    let backend_id = state.strategy.select_backend(&incoming, &state.pool).await;
-
-    let backend_id = match backend_id {
-        Some(id) => id,
-        None => {
-            state.backpressure.release();
-            state
-                .metrics
-                .rejected_requests
-                .get_or_create(&RejectLabels {
-                    reason: "no_healthy_backend".to_string(),
-                })
-                .inc();
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
+    let Some(backend_id) = state.strategy.select_backend(&incoming, &state.pool).await else {
+        inc_rejected(&state, "no_healthy_backend");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    // Check circuit breaker
     if let Some(cb) = state.circuit_breakers.get(backend_id) {
         if !cb.allows_request() {
-            state.backpressure.release();
-            state
-                .metrics
-                .rejected_requests
-                .get_or_create(&RejectLabels {
-                    reason: "circuit_open".to_string(),
-                })
-                .inc();
+            inc_rejected(&state, "circuit_open");
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
 
-    let backend = match state.pool.get(backend_id) {
-        Some(b) => b.clone(),
-        None => {
-            state.backpressure.release();
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
+    let backend = state
+        .pool
+        .get(backend_id)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        .clone();
 
     backend.record_request_start();
     let start = Instant::now();
-
-    // Rebuild the request with the buffered body
-    let rebuilt = Request::builder()
-        .method(http::Method::POST)
-        .uri(&path)
-        .header("content-type", "application/json")
-        .body(Body::from(body_bytes))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let result = forward_request(&backend, &state.client, rebuilt).await;
+    let result = forward_request(
+        &backend,
+        &state.client,
+        parts.method,
+        &parts.uri,
+        &parts.headers,
+        body_bytes,
+    )
+    .await;
     let elapsed = start.elapsed();
 
-    let (response, success) = match result {
-        Ok(resp) => {
-            let success = resp.status().is_success();
-            (Ok(resp), success)
-        }
-        Err(status) => (Err(status), false),
+    let (success, status_str) = match &result {
+        Ok(fw) => (fw.status.is_success(), fw.status.as_u16().to_string()),
+        Err(status) => (false, status.as_u16().to_string()),
     };
 
     backend.record_request_end(success);
-    backend.update_ewma_latency(elapsed.as_micros() as u64, 0.3);
+    backend.update_ewma_latency(elapsed.as_micros() as u64, state.ewma_alpha);
     state
         .strategy
         .on_request_complete(backend_id, elapsed, success);
-
     if let Some(cb) = state.circuit_breakers.get(backend_id) {
         if success {
             cb.record_success();
@@ -170,11 +158,6 @@ async fn proxy_handler(
             cb.record_failure();
         }
     }
-
-    let status_str = match &response {
-        Ok(r) => r.status().as_u16().to_string(),
-        Err(s) => s.as_u16().to_string(),
-    };
 
     state
         .metrics
@@ -185,7 +168,6 @@ async fn proxy_handler(
             status: status_str,
         })
         .inc();
-
     state
         .metrics
         .request_duration
@@ -194,6 +176,5 @@ async fn proxy_handler(
         })
         .observe(elapsed.as_secs_f64());
 
-    state.backpressure.release();
-    response
+    result.map(|fw| into_response(fw, &backend.url))
 }

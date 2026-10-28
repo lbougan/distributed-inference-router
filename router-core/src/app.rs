@@ -79,6 +79,7 @@ pub fn build_app(config: RouterConfig) -> Result<App, Box<dyn std::error::Error>
         circuit_breakers,
         backpressure,
         metrics,
+        ewma_alpha: config.routing.latency_aware.alpha,
     };
 
     let router = server::build_router(state.clone());

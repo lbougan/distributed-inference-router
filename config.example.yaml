@@ -6,6 +6,8 @@ routing:
   strategy: "latency_aware"
   prefix_cache:
     prefix_token_count: 256
+  latency_aware:
+    alpha: 0.3
 
 backends:
   - url: "http://vllm-1:8000"

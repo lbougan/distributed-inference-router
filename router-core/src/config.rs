@@ -31,6 +31,27 @@ pub struct RoutingConfig {
     pub strategy: String,
     #[serde(default)]
     pub prefix_cache: PrefixCacheConfig,
+    #[serde(default)]
+    pub latency_aware: LatencyAwareConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LatencyAwareConfig {
+    /// EWMA smoothing factor in (0, 1]. Higher reacts faster to the latest sample.
+    #[serde(default = "default_ewma_alpha")]
+    pub alpha: f64,
+}
+
+impl Default for LatencyAwareConfig {
+    fn default() -> Self {
+        Self {
+            alpha: default_ewma_alpha(),
+        }
+    }
+}
+
+fn default_ewma_alpha() -> f64 {
+    0.3
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,5 +215,32 @@ impl RouterConfig {
     pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         Ok(Self::from_yaml(&contents)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimal_yaml_uses_defaults() {
+        let cfg = RouterConfig::from_yaml(
+            "listen: {}\nrouting: {}\nbackends:\n  - url: \"http://a:8000\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.listen.port, 8080);
+        assert_eq!(cfg.routing.strategy, "round_robin");
+        assert_eq!(cfg.routing.latency_aware.alpha, 0.3);
+        assert_eq!(cfg.backends[0].weight, 1);
+        assert_eq!(cfg.circuit_breaker.min_requests, 5);
+    }
+
+    #[test]
+    fn latency_aware_alpha_is_configurable() {
+        let cfg = RouterConfig::from_yaml(
+            "listen: {}\nrouting:\n  strategy: latency_aware\n  latency_aware:\n    alpha: 0.5\nbackends: []\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.routing.latency_aware.alpha, 0.5);
     }
 }

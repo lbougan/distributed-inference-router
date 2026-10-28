@@ -21,29 +21,23 @@ impl PrefixCacheAware {
     }
 
     fn extract_prefix(&self, body: &Option<serde_json::Value>) -> String {
-        let body = match body {
-            Some(b) => b,
-            None => return String::new(),
+        let Some(body) = body else {
+            return String::new();
         };
 
-        // Try chat completions format: messages[0].content
-        if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
-            let combined: String = messages
+        let text: String = if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
+            messages
                 .iter()
                 .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
                 .collect::<Vec<_>>()
-                .join(" ");
-            let end = combined.len().min(self.prefix_char_limit);
-            return combined[..end].to_string();
-        }
+                .join(" ")
+        } else if let Some(prompt) = body.get("prompt").and_then(|p| p.as_str()) {
+            prompt.to_string()
+        } else {
+            return String::new();
+        };
 
-        // Try completions format: prompt
-        if let Some(prompt) = body.get("prompt").and_then(|p| p.as_str()) {
-            let end = prompt.len().min(self.prefix_char_limit);
-            return prompt[..end].to_string();
-        }
-
-        String::new()
+        text.chars().take(self.prefix_char_limit).collect()
     }
 
     fn consistent_hash(prefix: &str, num_backends: usize) -> usize {
@@ -145,5 +139,14 @@ mod tests {
             seen.len() > 1,
             "different prefixes should spread across backends"
         );
+    }
+
+    #[test]
+    fn prefix_truncation_is_char_safe() {
+        // 2 tokens -> 8 chars. "é" is 2 bytes; byte slicing at 8 would cut inside a char.
+        let strategy = PrefixCacheAware::new(2);
+        let body = serde_json::json!({"prompt": "ééééééééééé"});
+        let prefix = strategy.extract_prefix(&Some(body));
+        assert_eq!(prefix, "éééééééé");
     }
 }
