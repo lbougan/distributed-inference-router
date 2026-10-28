@@ -13,7 +13,7 @@ pub struct IncomingRequest {
     pub body: Option<serde_json::Value>,
 }
 
-/// Pick one of the routable backends. `routable` is never empty when called.
+/// Pick one of the routable backends. `routable` may be empty; return `None` then.
 /// Strategies are pure selectors; accounting is the router's job.
 pub trait RoutingStrategy: Send + Sync {
     fn select(&self, request: &IncomingRequest, routable: &[Arc<Backend>]) -> Option<BackendId>;

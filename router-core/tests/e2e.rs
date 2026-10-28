@@ -369,3 +369,67 @@ async fn client_abort_mid_stream_releases_in_flight_and_is_not_a_backend_failure
         Some(0.0)
     );
 }
+
+#[tokio::test]
+async fn half_open_probe_is_single_and_other_backends_keep_serving() {
+    let flaky = spawn_mock("flaky").await;
+    let ok = spawn_mock("ok").await;
+    flaky.set_fail(true);
+    let r = start_router(
+        &[&flaky, &ok],
+        RouterOpts {
+            cb_min_requests: 2,
+            cb_open_secs: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = client();
+    // Trip the breaker on `flaky` (round-robin sends every other request there).
+    for _ in 0..6 {
+        post_chat(&c, &r.url, "x").await;
+    }
+    let text = c
+        .get(format!("{}/metrics", r.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        metric_value(&text, "router_circuit_breaker_state", &flaky.url),
+        Some(2.0)
+    );
+
+    // After open_duration the breaker is half-open: hold the single probe open by making
+    // `flaky` slow, then confirm concurrent requests all go to `ok` (none 503, none to flaky
+    // beyond the one probe).
+    flaky.set_fail(false);
+    flaky.set_latency_ms(800);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let before = flaky.requests();
+    let statuses: Vec<u16> = join_all((0..8).map(|_| post_chat(&c, &r.url, "x")))
+        .await
+        .into_iter()
+        .map(|resp| resp.status().as_u16())
+        .collect();
+    assert!(statuses.iter().all(|s| *s == 200), "{statuses:?}");
+    assert!(
+        flaky.requests() - before <= 1,
+        "at most one probe while half-open"
+    );
+    // The probe succeeded, so the circuit closes and flaky re-enters rotation.
+    wait_until(Duration::from_secs(3), "flaky circuit closed", || async {
+        let text = c
+            .get(format!("{}/metrics", r.url))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        metric_value(&text, "router_circuit_breaker_state", &flaky.url) == Some(0.0)
+    })
+    .await;
+}
