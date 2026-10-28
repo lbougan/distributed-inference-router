@@ -491,3 +491,125 @@ async fn prefix_cache_keeps_locality_across_a_backend_loss() {
     }
     assert!(moved <= 6, "moved {moved} of 10 prefixes");
 }
+
+#[tokio::test]
+async fn least_load_avoids_backend_with_a_deep_queue() {
+    let m1 = spawn_mock("m1").await;
+    let m2 = spawn_mock("m2").await;
+    m1.set_queue_depth(20);
+    let r = start_router(
+        &[&m1, &m2],
+        RouterOpts {
+            strategy: "least_load",
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = client();
+    wait_until(Duration::from_secs(5), "queue depth scraped", || async {
+        let text = c
+            .get(format!("{}/metrics", r.url))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        metric_value(&text, "router_backend_queue_depth", &m1.url) == Some(20.0)
+    })
+    .await;
+    for _ in 0..10 {
+        assert_eq!(post_chat(&c, &r.url, "x").await.status(), 200);
+    }
+    assert_eq!(m1.requests(), 0, "queue depth 20 must lose every tie-break");
+    assert_eq!(m2.requests(), 10);
+    let text = c
+        .get(format!("{}/metrics", r.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        metric_value(&text, "router_backend_queue_depth", &m1.url),
+        Some(20.0)
+    );
+    assert_eq!(
+        metric_value(&text, "router_backend_kv_cache_usage", &m1.url),
+        Some(0.1)
+    );
+}
+
+#[tokio::test]
+async fn backend_over_queue_limit_is_not_routable() {
+    let m1 = spawn_mock("m1").await;
+    let m2 = spawn_mock("m2").await;
+    m1.set_queue_depth(100);
+    let r = start_router(
+        &[&m1, &m2],
+        RouterOpts {
+            max_backend_queue_depth: 50,
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = client();
+    wait_until(Duration::from_secs(5), "queue depth scraped", || async {
+        let text = c
+            .get(format!("{}/metrics", r.url))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        metric_value(&text, "router_backend_queue_depth", &m1.url) == Some(100.0)
+    })
+    .await;
+    for _ in 0..6 {
+        assert_eq!(post_chat(&c, &r.url, "x").await.status(), 200);
+    }
+    assert_eq!((m1.requests(), m2.requests()), (0, 6));
+}
+
+#[tokio::test]
+async fn metrics_endpoint_can_be_disabled() {
+    let m = spawn_mock("m1").await;
+    let r = start_router(
+        &[&m],
+        RouterOpts {
+            metrics_enabled: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        client()
+            .get(format!("{}/metrics", r.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn weighted_round_robin_follows_config() {
+    let m1 = spawn_mock("m1").await;
+    let m2 = spawn_mock("m2").await;
+    let r = start_router(
+        &[&m1, &m2],
+        RouterOpts {
+            weights: vec![1, 3],
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = client();
+    for _ in 0..8 {
+        assert_eq!(post_chat(&c, &r.url, "x").await.status(), 200);
+    }
+    assert_eq!((m1.requests(), m2.requests()), (2, 6));
+}

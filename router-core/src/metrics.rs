@@ -31,6 +31,8 @@ pub struct RouterMetrics {
     pub active_connections: Family<BackendLabels, Gauge>,
     pub circuit_breaker_state: Family<BackendLabels, Gauge>,
     pub backend_health: Family<BackendLabels, Gauge>,
+    pub backend_queue_depth: Family<BackendLabels, Gauge>,
+    pub backend_kv_cache_usage: Family<BackendLabels, Gauge<f64, std::sync::atomic::AtomicU64>>,
     pub rejected_requests: Family<RejectLabels, Counter>,
     pub in_flight: Gauge,
     pub registry: Arc<std::sync::Mutex<Registry>>,
@@ -83,6 +85,21 @@ impl RouterMetrics {
             backend_health.clone(),
         );
 
+        let backend_queue_depth = Family::<BackendLabels, Gauge>::default();
+        registry.register(
+            "router_backend_queue_depth",
+            "Requests waiting in the backend queue (scraped)",
+            backend_queue_depth.clone(),
+        );
+
+        let backend_kv_cache_usage =
+            Family::<BackendLabels, Gauge<f64, std::sync::atomic::AtomicU64>>::default();
+        registry.register(
+            "router_backend_kv_cache_usage",
+            "Backend KV cache usage ratio 0..1 (scraped)",
+            backend_kv_cache_usage.clone(),
+        );
+
         let rejected_requests = Family::<RejectLabels, Counter>::default();
         registry.register(
             "router_rejected_requests_total",
@@ -103,6 +120,8 @@ impl RouterMetrics {
             active_connections,
             circuit_breaker_state,
             backend_health,
+            backend_queue_depth,
+            backend_kv_cache_usage,
             rejected_requests,
             in_flight,
             registry: Arc::new(std::sync::Mutex::new(registry)),

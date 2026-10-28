@@ -41,13 +41,16 @@ pub fn build_app(config: RouterConfig) -> Result<App, Box<dyn std::error::Error>
             ))
         })
         .collect();
-    let pool = Arc::new(BackendPool::new(backends));
+    let pool = Arc::new(BackendPool::new(
+        backends,
+        config.backpressure.max_backend_queue_depth,
+    ));
 
     let strategy = routing::create_strategy(
         &config.routing.strategy,
         config.routing.prefix_cache.prefix_token_count,
         pool.len(),
-    );
+    )?;
 
     let client = reqwest::Client::builder()
         .pool_max_idle_per_host(100)
@@ -72,7 +75,7 @@ pub fn build_app(config: RouterConfig) -> Result<App, Box<dyn std::error::Error>
         ewma_alpha: config.routing.latency_aware.alpha,
     };
 
-    let router = server::build_router(state.clone());
+    let router = server::build_router(state.clone(), &config.metrics);
     Ok(App {
         router,
         state,

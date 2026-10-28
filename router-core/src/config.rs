@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+#[serde(deny_unknown_fields)]
 pub struct RouterConfig {
     pub listen: ListenConfig,
     pub routing: RoutingConfig,
@@ -18,6 +18,7 @@ pub struct RouterConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListenConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -26,6 +27,7 @@ pub struct ListenConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutingConfig {
     #[serde(default = "default_strategy")]
     pub strategy: String,
@@ -36,6 +38,7 @@ pub struct RoutingConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LatencyAwareConfig {
     /// EWMA smoothing factor in (0, 1]. Higher reacts faster to the latest sample.
     #[serde(default = "default_ewma_alpha")]
@@ -55,6 +58,7 @@ fn default_ewma_alpha() -> f64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrefixCacheConfig {
     #[serde(default = "default_prefix_token_count")]
     pub prefix_token_count: usize,
@@ -69,6 +73,7 @@ impl Default for PrefixCacheConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     pub url: String,
     #[serde(default = "default_weight")]
@@ -76,6 +81,7 @@ pub struct BackendConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
     #[serde(default = "default_interval_secs")]
     pub interval_secs: u64,
@@ -96,6 +102,7 @@ impl Default for HealthCheckConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CircuitBreakerConfig {
     #[serde(default = "default_failure_rate")]
     pub failure_rate_threshold: f64,
@@ -119,7 +126,7 @@ impl Default for CircuitBreakerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+#[serde(deny_unknown_fields)]
 pub struct BackpressureConfig {
     #[serde(default = "default_max_in_flight")]
     pub max_in_flight: usize,
@@ -137,7 +144,7 @@ impl Default for BackpressureConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     #[serde(default = "default_metrics_enabled")]
     pub enabled: bool,
@@ -281,6 +288,27 @@ mod tests {
         assert_eq!(cfg.routing.latency_aware.alpha, 0.3);
         assert_eq!(cfg.backends[0].weight, 1);
         assert_eq!(cfg.circuit_breaker.min_requests, 5);
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let err = RouterConfig::from_yaml(
+            "listen: {}\nrouting: {}\nbackends: []\nbackpresure: {max_in_flight: 1}\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn shipped_config_files_parse() {
+        for rel in [
+            "../config.example.yaml",
+            "../deploy/router-config.yaml",
+            "../deploy/router-config-gpu.yaml",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+            RouterConfig::from_file(&path).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        }
     }
 
     #[test]

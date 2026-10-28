@@ -1,5 +1,6 @@
 pub mod latency_aware;
 pub mod least_connections;
+pub mod least_load;
 pub mod prefix_cache;
 pub mod ring;
 pub mod round_robin;
@@ -24,23 +25,18 @@ pub fn create_strategy(
     name: &str,
     prefix_token_count: usize,
     num_backends: usize,
-) -> Box<dyn RoutingStrategy> {
-    match name {
+) -> Result<Box<dyn RoutingStrategy>, String> {
+    Ok(match name {
         "round_robin" => Box::new(round_robin::RoundRobin::new()),
         "least_connections" => Box::new(least_connections::LeastConnections),
+        "least_load" => Box::new(least_load::LeastLoad),
         "latency_aware" => Box::new(latency_aware::LatencyAware::new()),
         "prefix_cache" => Box::new(prefix_cache::PrefixCacheAware::new(
             prefix_token_count,
             num_backends,
         )),
-        _ => {
-            tracing::warn!(
-                strategy = name,
-                "Unknown strategy, falling back to round_robin"
-            );
-            Box::new(round_robin::RoundRobin::new())
-        }
-    }
+        other => return Err(format!("unknown routing strategy {other:?}")),
+    })
 }
 
 #[cfg(test)]

@@ -24,13 +24,15 @@ pub struct AppState {
     pub ewma_alpha: f64,
 }
 
-pub fn build_router(state: AppState) -> Router {
-    Router::new()
+pub fn build_router(state: AppState, metrics: &crate::config::MetricsConfig) -> Router {
+    let mut router = Router::new()
         .route("/health", get(health_handler))
-        .route("/metrics", get(metrics_handler))
         .route("/v1/completions", any(proxy_handler))
-        .route("/v1/chat/completions", any(proxy_handler))
-        .with_state(state)
+        .route("/v1/chat/completions", any(proxy_handler));
+    if metrics.enabled {
+        router = router.route(&metrics.path, get(metrics_handler));
+    }
+    router.with_state(state)
 }
 
 async fn health_handler() -> StatusCode {
@@ -60,6 +62,27 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
             .circuit_breaker_state
             .get_or_create(&labels)
             .set(backend.breaker.state().as_u64() as i64);
+
+        state
+            .metrics
+            .backend_queue_depth
+            .get_or_create(&labels)
+            .set(
+                backend
+                    .queue_depth
+                    .load(std::sync::atomic::Ordering::Relaxed) as i64,
+            );
+
+        state
+            .metrics
+            .backend_kv_cache_usage
+            .get_or_create(&labels)
+            .set(
+                backend
+                    .kv_cache_usage_bp
+                    .load(std::sync::atomic::Ordering::Relaxed) as f64
+                    / 10_000.0,
+            );
     }
 
     state

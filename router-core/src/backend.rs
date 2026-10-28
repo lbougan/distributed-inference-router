@@ -93,17 +93,24 @@ impl Backend {
 
 pub struct BackendPool {
     pub backends: Vec<Arc<Backend>>,
+    /// Backends reporting more waiting requests than this are not routable.
+    pub max_queue_depth: u64,
 }
 
 impl BackendPool {
-    pub fn new(backends: Vec<Arc<Backend>>) -> Self {
-        Self { backends }
+    pub fn new(backends: Vec<Arc<Backend>>, max_queue_depth: u64) -> Self {
+        Self {
+            backends,
+            max_queue_depth,
+        }
     }
 
     pub fn routable(&self) -> Vec<Arc<Backend>> {
         self.backends
             .iter()
-            .filter(|b| b.is_routable())
+            .filter(|b| {
+                b.is_routable() && b.queue_depth.load(Ordering::Relaxed) <= self.max_queue_depth
+            })
             .cloned()
             .collect()
     }
@@ -136,12 +143,23 @@ mod tests {
 
     #[test]
     fn routable_excludes_unhealthy_and_open_circuit() {
-        let pool = BackendPool::new(vec![backend(0), backend(1), backend(2)]);
+        let pool = BackendPool::new(vec![backend(0), backend(1), backend(2)], 50);
         pool.backends[1].mark_unhealthy();
         let open = CircuitBreaker::new(0.5, 1, 60, 30);
         open.record_failure(crate::circuit_breaker::Admission::Normal);
         let b2 = Arc::new(Backend::new(2, "http://b2".into(), 1, open));
-        let pool = BackendPool::new(vec![pool.backends[0].clone(), pool.backends[1].clone(), b2]);
+        let pool = BackendPool::new(
+            vec![pool.backends[0].clone(), pool.backends[1].clone(), b2],
+            50,
+        );
+        let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![0]);
+    }
+
+    #[test]
+    fn routable_excludes_backends_over_queue_depth_limit() {
+        let pool = BackendPool::new(vec![backend(0), backend(1)], 50);
+        pool.backends[1].queue_depth.store(51, Ordering::Relaxed);
         let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
         assert_eq!(ids, vec![0]);
     }

@@ -3,6 +3,7 @@ listen:
   port: 8080
 
 routing:
+  # round_robin | least_connections | least_load | latency_aware | prefix_cache
   strategy: "latency_aware"
   prefix_cache:
     prefix_token_count: 256

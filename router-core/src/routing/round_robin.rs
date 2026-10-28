@@ -24,11 +24,19 @@ impl Default for RoundRobin {
 
 impl RoutingStrategy for RoundRobin {
     fn select(&self, _request: &IncomingRequest, routable: &[Arc<Backend>]) -> Option<BackendId> {
-        if routable.is_empty() {
+        let total: u64 = routable.iter().map(|b| u64::from(b.weight.max(1))).sum();
+        if total == 0 {
             return None;
         }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % routable.len();
-        Some(routable[idx].id)
+        let mut slot = (self.counter.fetch_add(1, Ordering::Relaxed) as u64) % total;
+        for b in routable {
+            let w = u64::from(b.weight.max(1));
+            if slot < w {
+                return Some(b.id);
+            }
+            slot -= w;
+        }
+        None
     }
 }
 
@@ -45,6 +53,31 @@ mod tests {
             .map(|_| strategy.select(&req(), &b).unwrap())
             .collect();
         assert_eq!(ids, vec![0, 1, 2, 0, 1, 2, 0, 1, 2]);
+    }
+
+    #[test]
+    fn weights_change_the_share() {
+        let strategy = RoundRobin::new();
+        let b = backends(2);
+        let b = vec![
+            Arc::new(Backend::new(
+                0,
+                b[0].url.clone(),
+                1,
+                crate::circuit_breaker::CircuitBreaker::default(),
+            )),
+            Arc::new(Backend::new(
+                1,
+                b[1].url.clone(),
+                3,
+                crate::circuit_breaker::CircuitBreaker::default(),
+            )),
+        ];
+        let ids: Vec<usize> = (0..8)
+            .map(|_| strategy.select(&req(), &b).unwrap())
+            .collect();
+        assert_eq!(ids.iter().filter(|i| **i == 0).count(), 2);
+        assert_eq!(ids.iter().filter(|i| **i == 1).count(), 6);
     }
 
     #[test]
