@@ -16,6 +16,8 @@ pub struct RouterConfig {
     pub backpressure: BackpressureConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub upstream: UpstreamConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +90,43 @@ pub struct BackendConfig {
     pub url: String,
     #[serde(default = "default_weight")]
     pub weight: u32,
+}
+
+impl BackendConfig {
+    /// The URL without trailing `/`, so `{url}{path}` never produces `//v1/...`.
+    pub fn normalized_url(&self) -> String {
+        self.url.trim_end_matches('/').to_string()
+    }
+}
+
+/// Timeouts for requests to backends. There is deliberately no total timeout: a stream that
+/// keeps producing bytes may run as long as the generation takes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamConfig {
+    /// TCP (and TLS) connect timeout.
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    /// Idle timeout: the longest gap allowed between two reads from the backend, including
+    /// the wait for the response headers.
+    #[serde(default = "default_read_timeout_secs")]
+    pub read_timeout_secs: u64,
+}
+
+impl Default for UpstreamConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_secs: default_connect_timeout_secs(),
+            read_timeout_secs: default_read_timeout_secs(),
+        }
+    }
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    10
+}
+fn default_read_timeout_secs() -> u64 {
+    120
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -291,11 +330,18 @@ impl RouterConfig {
                 "metrics.path must start with '/' and not collide with a router route, got {path:?}"
             ));
         }
-        // axum would read these as path parameters or wildcards (or panic on them).
-        if path.contains(['{', '}', '*']) {
+        // axum 0.7 (matchit 0.7) reads `:name` as a path parameter and `*name` as a
+        // wildcard; braces are literals there but are parameters from axum 0.8 on.
+        if path.contains([':', '*', '{', '}']) {
             return Err(format!(
-                "metrics.path must be a literal path without '{{', '}}' or '*', got {path:?}"
+                "metrics.path must be a literal path without ':', '*', '{{' or '}}', got {path:?}"
             ));
+        }
+        if self.upstream.connect_timeout_secs < 1 {
+            return Err("upstream.connect_timeout_secs must be >= 1".to_string());
+        }
+        if self.upstream.read_timeout_secs < 1 {
+            return Err("upstream.read_timeout_secs must be >= 1".to_string());
         }
         if self.backends.is_empty() {
             return Err("backends must not be empty".to_string());
@@ -478,9 +524,44 @@ mod tests {
             "/metrics/{id}",
             "/metrics/}",
             "/metrics/*rest",
+            "/metrics/:v1",
         ] {
             rejects(&format!("metrics:\n  path: \"{p}\"\n"), "metrics.path");
         }
+    }
+
+    #[test]
+    fn upstream_timeouts_default_and_are_configurable() {
+        let cfg =
+            RouterConfig::from_yaml(&format!("routing: {{}}\nbackends:{ONE_BACKEND}\n")).unwrap();
+        assert_eq!(cfg.upstream.connect_timeout_secs, 10);
+        assert_eq!(cfg.upstream.read_timeout_secs, 120);
+        let cfg = RouterConfig::from_yaml(&format!(
+            "routing: {{}}\nbackends:{ONE_BACKEND}\nupstream:\n  read_timeout_secs: 30\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.upstream.connect_timeout_secs, 10);
+        assert_eq!(cfg.upstream.read_timeout_secs, 30);
+    }
+
+    #[test]
+    fn rejects_zero_upstream_timeouts() {
+        rejects(
+            "upstream:\n  connect_timeout_secs: 0\n",
+            "connect_timeout_secs",
+        );
+        rejects("upstream:\n  read_timeout_secs: 0\n", "read_timeout_secs");
+        rejects("upstream:\n  total_timeout_secs: 5\n", "unknown field");
+    }
+
+    #[test]
+    fn backend_url_trailing_slashes_are_trimmed() {
+        let cfg = RouterConfig::from_yaml(
+            "routing: {}\nbackends:\n  - url: \"http://b:8000/\"\n  - url: \"http://c:8000//\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.backends[0].normalized_url(), "http://b:8000");
+        assert_eq!(cfg.backends[1].normalized_url(), "http://c:8000");
     }
 
     #[test]

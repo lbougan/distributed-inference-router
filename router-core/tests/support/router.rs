@@ -27,6 +27,7 @@ pub struct RouterOpts {
     pub cb_open_secs: u64,
     pub max_backend_queue_depth: u64,
     pub metrics_enabled: bool,
+    pub read_timeout_secs: u64,
 }
 
 impl Default for RouterOpts {
@@ -42,6 +43,7 @@ impl Default for RouterOpts {
             cb_open_secs: 30,
             max_backend_queue_depth: 50,
             metrics_enabled: true,
+            read_timeout_secs: 120,
         }
     }
 }
@@ -59,7 +61,8 @@ pub fn test_config_yaml(backend_urls: &[&str], opts: &RouterOpts) -> String {
          health_check:\n  interval_secs: {hi}\n  unhealthy_threshold: {ut}\n  healthy_threshold: {ht}\n\
          circuit_breaker:\n  failure_rate_threshold: 0.5\n  min_requests: {minr}\n  window_secs: 60\n  open_duration_secs: {open}\n\
          backpressure:\n  max_in_flight: {mif}\n  max_backend_queue_depth: {mqd}\n\
-         metrics:\n  enabled: {men}\n  path: \"/metrics\"\n",
+         metrics:\n  enabled: {men}\n  path: \"/metrics\"\n\
+         upstream:\n  connect_timeout_secs: 5\n  read_timeout_secs: {rt}\n",
         strategy = opts.strategy,
         hi = opts.health_interval_secs,
         ut = opts.unhealthy_threshold,
@@ -69,12 +72,18 @@ pub fn test_config_yaml(backend_urls: &[&str], opts: &RouterOpts) -> String {
         mif = opts.max_in_flight,
         mqd = opts.max_backend_queue_depth,
         men = opts.metrics_enabled,
+        rt = opts.read_timeout_secs,
     )
 }
 
 pub async fn start_router(backends: &[&MockHandle], opts: RouterOpts) -> RouterHandle {
     let urls: Vec<&str> = backends.iter().map(|b| b.url.as_str()).collect();
-    let config = RouterConfig::from_yaml(&test_config_yaml(&urls, &opts)).expect("valid config");
+    start_router_with_urls(&urls, opts).await
+}
+
+/// Like `start_router`, but with backend URLs written verbatim into the config.
+pub async fn start_router_with_urls(urls: &[&str], opts: RouterOpts) -> RouterHandle {
+    let config = RouterConfig::from_yaml(&test_config_yaml(urls, &opts)).expect("valid config");
     let app = build_app(config).expect("app builds");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

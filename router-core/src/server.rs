@@ -10,7 +10,7 @@ use crate::backend::{Backend, BackendPool};
 use crate::backpressure::BackpressureController;
 use crate::circuit_breaker::Admission;
 use crate::metrics::{BackendLabels, RejectLabels, RouterMetrics};
-use crate::proxy::{forward_request, Forwarded, ForwardedBody, MAX_BODY_BYTES};
+use crate::proxy::{forward_request, ForwardError, Forwarded, ForwardedBody, MAX_BODY_BYTES};
 use crate::routing::{IncomingRequest, RoutingStrategy};
 
 #[derive(Clone)]
@@ -106,9 +106,10 @@ fn inc_rejected(state: &AppState, reason: &str) {
 fn into_response(
     forwarded: Forwarded,
     backend_url: &str,
-    accounting: RequestAccounting,
+    mut accounting: RequestAccounting,
 ) -> Response<Body> {
     let status = forwarded.status;
+    accounting.resolve_probe_on_headers(status);
     let mut builder = Response::builder().status(status);
     if let Some(h) = builder.headers_mut() {
         *h = forwarded.headers;
@@ -126,16 +127,29 @@ fn into_response(
     builder.body(body).expect("response from valid parts")
 }
 
-/// 413 when the body exceeds `MAX_BODY_BYTES`, 400 for any other read failure.
-fn body_error_status(err: axum::Error) -> StatusCode {
+/// 413 when the body exceeds `MAX_BODY_BYTES`, 400 for any other read failure, with the
+/// matching `router_rejected_requests_total` reason.
+fn body_error_status(err: axum::Error) -> (StatusCode, &'static str) {
     let is_too_large = std::error::Error::source(&err)
         .map(|s| s.is::<http_body_util::LengthLimitError>())
         .unwrap_or(false);
     if is_too_large {
-        StatusCode::PAYLOAD_TOO_LARGE
+        (StatusCode::PAYLOAD_TOO_LARGE, "body_too_large")
     } else {
-        StatusCode::BAD_REQUEST
+        (StatusCode::BAD_REQUEST, "bad_body")
     }
+}
+
+/// Records the verdict for a failed forward and returns the client's status.
+fn finish_forward_error(mut accounting: RequestAccounting, err: ForwardError) -> StatusCode {
+    match err {
+        ForwardError::Connect => accounting.finish(Outcome::TransportError),
+        ForwardError::Body { headers_at } => {
+            accounting.mark_headers_received_at(headers_at);
+            accounting.finish(Outcome::StreamError);
+        }
+    }
+    err.status()
 }
 
 /// Ask the strategy for a backend among the routable ones; if its breaker refuses the
@@ -175,9 +189,14 @@ async fn proxy_handler(
     };
 
     let (parts, body) = req.into_parts();
-    let body_bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
-        .await
-        .map_err(body_error_status)?;
+    let body_bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let (status, reason) = body_error_status(err);
+            inc_rejected(&state, reason);
+            return Err(status);
+        }
+    };
     let incoming = IncomingRequest {
         path: parts.uri.path().to_string(),
         body: serde_json::from_slice(&body_bytes).ok(),
@@ -210,9 +229,60 @@ async fn proxy_handler(
             accounting.mark_headers_received_at(forwarded.headers_at);
             Ok(into_response(forwarded, &backend.url, accounting))
         }
-        Err(status) => {
-            accounting.finish(Outcome::TransportError);
-            Err(status)
-        }
+        Err(err) => Err(finish_forward_error(accounting, err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit_breaker::CircuitBreaker;
+    use std::time::{Duration, Instant};
+
+    fn accounting(metrics: &RouterMetrics) -> (Arc<Backend>, RequestAccounting) {
+        let backend = Arc::new(Backend::new(
+            0,
+            "http://b0".into(),
+            1,
+            CircuitBreaker::default(),
+        ));
+        let permit = Arc::new(BackpressureController::new(1))
+            .try_acquire()
+            .unwrap();
+        let acc = RequestAccounting::start(
+            backend.clone(),
+            metrics.clone(),
+            "test".into(),
+            0.3,
+            Admission::Normal,
+            permit,
+        );
+        (backend, acc)
+    }
+
+    #[test]
+    fn connect_failure_is_a_transport_error() {
+        let metrics = RouterMetrics::new();
+        let (_b, acc) = accounting(&metrics);
+        assert_eq!(
+            finish_forward_error(acc, ForwardError::Connect),
+            StatusCode::BAD_GATEWAY
+        );
+        let text = metrics.encode();
+        assert!(text.contains("status=\"transport_error\""), "{text}");
+    }
+
+    #[test]
+    fn body_failure_after_headers_is_a_stream_error() {
+        let metrics = RouterMetrics::new();
+        let (_b, acc) = accounting(&metrics);
+        let headers_at = Instant::now() - Duration::from_millis(1);
+        assert_eq!(
+            finish_forward_error(acc, ForwardError::Body { headers_at }),
+            StatusCode::BAD_GATEWAY
+        );
+        let text = metrics.encode();
+        assert!(text.contains("status=\"stream_error\""), "{text}");
+        assert!(!text.contains("transport_error"), "{text}");
     }
 }

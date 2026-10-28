@@ -150,9 +150,11 @@ pub struct ScrapeFound {
 
 /// Reads `vllm:num_requests_waiting` and `vllm:kv_cache_usage_perc`
 /// (or the pre-0.6 name `vllm:gpu_cache_usage_perc`). Exact-name match only.
-/// Reports which of the two metrics were present.
+/// A backend serving several models exposes one series per label set: queue depth is the
+/// sum over all series, KV-cache usage the maximum. Reports which metrics were present.
 pub fn parse_backend_metrics(text: &str, backend: &Backend) -> ScrapeFound {
-    let mut found = ScrapeFound::default();
+    let mut queue: Option<f64> = None;
+    let mut kv: Option<f64> = None;
     for line in text.lines() {
         if line.starts_with('#') {
             continue;
@@ -160,24 +162,30 @@ pub fn parse_backend_metrics(text: &str, backend: &Backend) -> ScrapeFound {
         match metric_name(line) {
             "vllm:num_requests_waiting" => {
                 if let Some(v) = metric_value(line) {
-                    backend
-                        .queue_depth
-                        .store(v.max(0.0) as u64, Ordering::Relaxed);
-                    found.queue_depth = true;
+                    queue = Some(queue.unwrap_or(0.0) + v.max(0.0));
                 }
             }
             "vllm:kv_cache_usage_perc" | "vllm:gpu_cache_usage_perc" => {
                 if let Some(v) = metric_value(line) {
-                    backend
-                        .kv_cache_usage_bp
-                        .store((v.clamp(0.0, 1.0) * 10_000.0) as u64, Ordering::Relaxed);
-                    found.kv_cache = true;
+                    let v = v.clamp(0.0, 1.0);
+                    kv = Some(kv.map_or(v, |k: f64| k.max(v)));
                 }
             }
             _ => {}
         }
     }
-    found
+    if let Some(q) = queue {
+        backend.queue_depth.store(q as u64, Ordering::Relaxed);
+    }
+    if let Some(k) = kv {
+        backend
+            .kv_cache_usage_bp
+            .store((k * 10_000.0) as u64, Ordering::Relaxed);
+    }
+    ScrapeFound {
+        queue_depth: queue.is_some(),
+        kv_cache: kv.is_some(),
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +247,19 @@ mod tests {
         assert_eq!(b.queue_depth.load(Ordering::Relaxed), 9);
         assert!(!record_probe(&b, false, &cfg));
         assert_eq!(b.queue_depth.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn sums_queue_depth_and_maxes_kv_usage_across_series() {
+        let b = backend();
+        let text = "vllm:num_requests_waiting{model_name=\"a\"} 3\n\
+                    vllm:num_requests_waiting{model_name=\"b\"} 4\n\
+                    vllm:kv_cache_usage_perc{model_name=\"a\"} 0.7\n\
+                    vllm:kv_cache_usage_perc{model_name=\"b\"} 0.2\n";
+        let found = parse_backend_metrics(text, &b);
+        assert!(found.queue_depth && found.kv_cache);
+        assert_eq!(b.queue_depth.load(Ordering::Relaxed), 7);
+        assert_eq!(b.kv_cache_usage_bp.load(Ordering::Relaxed), 7000);
     }
 
     #[test]

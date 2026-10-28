@@ -44,6 +44,22 @@ pub struct Forwarded {
     pub headers_at: Instant,
 }
 
+/// Why forwarding failed. Both become 502 for the client; they differ for the breaker and
+/// the metrics label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardError {
+    /// No response headers: connect failure, reset, or read timeout before the headers.
+    Connect,
+    /// The headers arrived but reading the buffered body failed.
+    Body { headers_at: Instant },
+}
+
+impl ForwardError {
+    pub fn status(self) -> StatusCode {
+        StatusCode::BAD_GATEWAY
+    }
+}
+
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.contains(&name.as_str()) || name == CONTENT_LENGTH
 }
@@ -67,7 +83,7 @@ pub fn is_event_stream(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Send the buffered request to `backend`. Transport failures become 502.
+/// Send the buffered request to `backend`.
 pub async fn forward_request(
     backend: &Backend,
     client: &reqwest::Client,
@@ -75,7 +91,7 @@ pub async fn forward_request(
     uri: &Uri,
     headers: &HeaderMap,
     body: Bytes,
-) -> Result<Forwarded, StatusCode> {
+) -> Result<Forwarded, ForwardError> {
     let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let url = format!("{}{}", backend.url, path);
 
@@ -87,7 +103,7 @@ pub async fn forward_request(
         .await
         .map_err(|e| {
             tracing::error!(backend = %backend.url, error = %e, "backend request failed");
-            StatusCode::BAD_GATEWAY
+            ForwardError::Connect
         })?;
     let headers_at = Instant::now();
 
@@ -98,7 +114,7 @@ pub async fn forward_request(
     } else {
         ForwardedBody::Full(resp.bytes().await.map_err(|e| {
             tracing::error!(backend = %backend.url, error = %e, "reading backend response body failed");
-            StatusCode::BAD_GATEWAY
+            ForwardError::Body { headers_at }
         })?)
     };
     Ok(Forwarded {
@@ -141,6 +157,16 @@ mod tests {
         assert_eq!(out["authorization"], "Bearer x");
         assert_eq!(out["content-type"], "application/json");
         assert!(!out.contains_key("x-router-backend"));
+    }
+
+    #[test]
+    fn forward_errors_are_502_for_the_client() {
+        assert_eq!(ForwardError::Connect.status(), StatusCode::BAD_GATEWAY);
+        let body = ForwardError::Body {
+            headers_at: Instant::now(),
+        };
+        assert_eq!(body.status(), StatusCode::BAD_GATEWAY);
+        assert_ne!(body, ForwardError::Connect);
     }
 
     #[test]

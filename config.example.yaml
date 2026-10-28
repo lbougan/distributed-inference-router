@@ -36,3 +36,9 @@ backpressure:
 metrics:
   enabled: true
   path: "/metrics"
+
+upstream:
+  # No total timeout: a stream may run as long as it keeps sending bytes.
+  connect_timeout_secs: 10
+  # Longest silence allowed from a backend (also the wait for response headers).
+  read_timeout_secs: 120

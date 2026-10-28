@@ -82,16 +82,17 @@ backends:
 circuit_breaker: { failure_rate_threshold: 0.5, min_requests: 5, window_secs: 60, open_duration_secs: 30 }
 backpressure:    { max_in_flight: 1000, max_backend_queue_depth: 50 }
 health_check:    { interval_secs: 5, unhealthy_threshold: 3, healthy_threshold: 2 }
+upstream:        { connect_timeout_secs: 10, read_timeout_secs: 120 }
 ```
 
 ## How a request flows
 
 1. **Admission.** Take a permit from the in-flight budget or answer 429. The permit is released when the response body ends, not when headers are sent.
 2. **Selection.** Build the routable set: healthy, breaker not open (or half-open with the probe free), scraped queue depth under `max_backend_queue_depth`. The queue limit is soft: if every live replica is over it, all of them stay routable and the in-flight budget sheds load instead. Hand the set to the strategy. If the strategy's pick refuses (half-open probe taken) drop it and ask again.
-3. **Forward.** Buffer the body (10 MiB cap), strip hop-by-hop headers, send with reqwest. SSE responses are streamed through.
+3. **Forward.** Buffer the body (10 MiB cap), strip hop-by-hop headers, send with reqwest. SSE responses are streamed through. There is no total timeout, only a connect timeout and an idle read timeout (`upstream.read_timeout_secs`): a stream may run as long as bytes keep arriving, and a backend silent for longer than that is a backend failure.
 4. **Account.** A guard records the breaker verdict and metrics when it is dropped: immediately for buffered responses, at the last chunk for streams. The latency-aware EWMA is fed time-to-first-byte (headers received), so output length does not bias routing; the histogram records the full duration for every outcome. A client that disconnects mid-stream is recorded as `client_disconnect` and does not count against the replica; a backend that breaks a stream after headers is `stream_error` and does.
 
-Breaker rules: failures are 5xx and transport errors (4xx is the client's fault). The failure rate is computed over the last `window_secs` in 1-second buckets. After `open_duration_secs` one probe request is let through; its result closes or re-opens the circuit.
+Breaker rules: failures are 5xx and transport errors (4xx is the client's fault). The failure rate is computed over the last `window_secs` in 1-second buckets. After `open_duration_secs` one probe request is let through; a probe counts as a success as soon as the backend answers 2xx headers (so a streaming probe does not keep the replica out for a whole generation), and a 5xx or transport error re-opens the circuit.
 
 ## Metrics
 
@@ -99,7 +100,7 @@ Breaker rules: failures are 5xx and transport errors (4xx is the client's fault)
 |---|---|---|
 | `router_requests_total` | counter | strategy, backend, status (`200`, `transport_error`, `stream_error`, `client_disconnect`, …) |
 | `router_request_duration_seconds` | histogram | backend (full duration, every outcome) |
-| `router_rejected_requests_total` | counter | reason: `backpressure`, `no_routable_backend` |
+| `router_rejected_requests_total` | counter | reason: `backpressure`, `no_routable_backend`, `body_too_large` (413), `bad_body` (400, unreadable request body) |
 | `router_in_flight` | gauge | |
 | `router_active_connections` | gauge | backend |
 | `router_backend_health` | gauge | backend (0/1) |
@@ -114,7 +115,7 @@ The Grafana dashboard in `deploy/grafana/` reads only these.
 ```bash
 cd router-core
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
-cargo test            # 78 unit tests + 19 in-process e2e tests, no Docker, < 30 s
+cargo test            # 92 unit tests + 24 in-process e2e tests, no Docker, < 30 s
 ```
 
 Python tooling (mock backend, load tester, docker-only tests):
@@ -152,7 +153,6 @@ docker compose -f deploy/docker-compose.yml up --build
 
 - Prefix hashing uses the first `prefix_token_count × 4` characters of the prompt, not real tokens, so prefix buckets are only approximately aligned with vLLM's 16-token blocks.
 - With few distinct prefixes the hash ring cannot balance load: in the `baseline` row `prefix_cache` sends only ~10 % of 10 prompts' traffic to one replica. Affinity trades balance for cache hits; use it when the prompt population is large.
-- The upstream client has a 300 s total timeout that also bounds streamed responses.
 - No retries: a 502 from a dead replica is returned to the client; the breaker and health checker remove the replica for the next request.
 - No TLS, auth or per-client rate limiting; put it behind a gateway for that.
 - The least-load benefit under real backend queueing is covered by an e2e test, not by a benchmark row.

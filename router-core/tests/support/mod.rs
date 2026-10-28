@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod mock_backend;
+pub mod raw_backend;
 pub mod router;
 
 use std::future::Future;

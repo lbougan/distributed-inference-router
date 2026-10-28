@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use support::mock_backend::spawn_mock;
-use support::router::{start_router, RouterOpts};
+use support::raw_backend::spawn_truncating_backend;
+use support::router::{start_router, start_router_with_urls, RouterOpts};
 use support::{chat_body, metric_value, wait_until};
 
 fn client() -> reqwest::Client {
@@ -360,6 +361,128 @@ async fn oversized_body_returns_413() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 413);
     assert_eq!(m.requests(), 0);
+    let text = client()
+        .get(format!("{}/metrics", r.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        metric_value(&text, "router_rejected_requests_total", "body_too_large"),
+        Some(1.0),
+        "{text}"
+    );
+}
+
+async fn metrics_text(router_url: &str) -> String {
+    client()
+        .get(format!("{router_url}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn invalid_body_encoding_is_counted_as_bad_body() {
+    // A body that is not valid for the declared framing: content-length larger than sent.
+    let m = spawn_mock("m1").await;
+    let r = start_router(&[&m], RouterOpts::default()).await;
+    let addr = r.url.trim_start_matches("http://").to_string();
+    let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    use tokio::io::AsyncWriteExt;
+    sock.write_all(
+        b"POST /v1/chat/completions HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: 50\r\n\r\n{\"a\":1}",
+    )
+    .await
+    .unwrap();
+    sock.shutdown().await.unwrap();
+    let url = r.url.clone();
+    wait_until(Duration::from_secs(5), "bad_body counted", || {
+        let url = url.clone();
+        async move {
+            metric_value(
+                &metrics_text(&url).await,
+                "router_rejected_requests_total",
+                "bad_body",
+            ) == Some(1.0)
+        }
+    })
+    .await;
+    assert_eq!(m.requests(), 0);
+}
+
+#[tokio::test]
+async fn backend_url_with_trailing_slash_still_routes() {
+    let m = spawn_mock("m1").await;
+    let with_slash = format!("{}/", m.url);
+    let r = start_router_with_urls(&[&with_slash], RouterOpts::default()).await;
+    let resp = post_chat(&client(), &r.url, "hi").await;
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.headers()["x-router-backend"], m.url.as_str());
+    assert_eq!(m.requests(), 1);
+}
+
+#[tokio::test]
+async fn stream_longer_than_read_timeout_completes_while_bytes_flow() {
+    let m = spawn_mock("m1").await;
+    m.set_stream(6, 400);
+    let r = start_router(
+        &[&m],
+        RouterOpts {
+            read_timeout_secs: 1,
+            ..RouterOpts::default()
+        },
+    )
+    .await;
+    let resp = client()
+        .post(format!("{}/v1/chat/completions", r.url))
+        .json(&chat_body("long", true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("tok5") && body.contains("[DONE]"), "{body}");
+    let url = r.url.clone();
+    wait_until(Duration::from_secs(5), "stream recorded as 200", || {
+        let url = url.clone();
+        async move { metrics_text(&url).await.contains("status=\"200\"") }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn backend_stalling_past_read_timeout_is_a_transport_error() {
+    let m = spawn_mock("m1").await;
+    m.set_latency_ms(2500);
+    let r = start_router(
+        &[&m],
+        RouterOpts {
+            read_timeout_secs: 1,
+            ..RouterOpts::default()
+        },
+    )
+    .await;
+    let resp = post_chat(&client(), &r.url, "stall").await;
+    assert_eq!(resp.status().as_u16(), 502);
+    let text = metrics_text(&r.url).await;
+    assert!(text.contains("status=\"transport_error\""), "{text}");
+}
+
+#[tokio::test]
+async fn truncated_buffered_body_is_a_stream_error() {
+    let raw = spawn_truncating_backend().await;
+    let r = start_router_with_urls(&[&raw.url], RouterOpts::default()).await;
+    let resp = post_chat(&client(), &r.url, "hi").await;
+    assert_eq!(resp.status().as_u16(), 502);
+    let text = metrics_text(&r.url).await;
+    assert!(text.contains("status=\"stream_error\""), "{text}");
+    assert!(!text.contains("status=\"transport_error\""), "{text}");
 }
 
 #[tokio::test]

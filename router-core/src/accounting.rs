@@ -94,6 +94,17 @@ impl RequestAccounting {
         self.headers_at.get_or_insert(at);
     }
 
+    /// A half-open probe is judged on the backend's response headers: 2xx closes the
+    /// circuit at once instead of keeping the backend unroutable for a whole generation.
+    /// The request's final verdict then counts as a normal sample. A 5xx is left to the
+    /// final verdict, which re-opens the circuit.
+    pub fn resolve_probe_on_headers(&mut self, status: StatusCode) {
+        if self.admission == Admission::Probe && status.is_success() {
+            self.backend.breaker.record_success(Admission::Probe);
+            self.admission = Admission::Normal;
+        }
+    }
+
     pub fn finish(mut self, outcome: Outcome) {
         self.outcome = outcome;
     }
@@ -155,11 +166,20 @@ impl Drop for RequestAccounting {
     }
 }
 
+const SSE_DONE: &[u8] = b"data: [DONE]";
+
+fn contains_done(chunk: &[u8]) -> bool {
+    chunk.windows(SSE_DONE.len()).any(|w| w == SSE_DONE)
+}
+
 /// Wraps the backend's SSE byte stream and finishes the accounting when it ends.
 pub struct AccountedStream {
     inner: ByteStream,
     status: StatusCode,
     accounting: Option<RequestAccounting>,
+    /// The last forwarded chunk carried `data: [DONE]`: the client has the whole answer
+    /// even if the body is dropped before the backend's end of stream is polled.
+    done_seen: bool,
 }
 
 impl AccountedStream {
@@ -168,6 +188,18 @@ impl AccountedStream {
             inner,
             status,
             accounting: Some(accounting),
+            done_seen: false,
+        }
+    }
+}
+
+impl Drop for AccountedStream {
+    fn drop(&mut self) {
+        if let Some(acc) = self.accounting.take() {
+            if self.done_seen {
+                acc.finish(Outcome::Completed(self.status));
+            }
+            // Otherwise the accounting's own Drop records a client disconnect.
         }
     }
 }
@@ -181,7 +213,10 @@ impl Stream for AccountedStream {
             return Poll::Ready(None);
         }
         match this.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(chunk))),
+            Poll::Ready(Some(Ok(chunk))) => {
+                this.done_seen = contains_done(&chunk);
+                Poll::Ready(Some(Ok(chunk)))
+            }
             Poll::Ready(Some(Err(e))) => {
                 if let Some(acc) = this.accounting.take() {
                     tracing::warn!(
@@ -412,5 +447,86 @@ mod tests {
         drop(acc);
         assert_eq!(breaker.try_begin(), Some(Admission::Probe));
         assert_eq!(breaker.state(), CircuitState::HalfOpen);
+    }
+
+    fn probe_fixture() -> Fixture {
+        Fixture {
+            backend: Arc::new(Backend::new(
+                0,
+                "http://b0".into(),
+                1,
+                CircuitBreaker::new(0.5, 1, 60, 1),
+            )),
+            controller: Arc::new(BackpressureController::new(4)),
+            metrics: RouterMetrics::new(),
+        }
+    }
+
+    #[test]
+    fn probe_resolves_on_2xx_headers_before_the_body_ends() {
+        let f = probe_fixture();
+        let breaker = &f.backend.breaker;
+        breaker.record_failure(Admission::Normal);
+        assert_eq!(breaker.state(), CircuitState::Open);
+        breaker.advance(Duration::from_secs(2));
+        let adm = breaker.try_begin().unwrap();
+        assert_eq!(adm, Admission::Probe);
+        let mut acc = RequestAccounting::start(
+            f.backend.clone(),
+            f.metrics.clone(),
+            "test".into(),
+            0.3,
+            adm,
+            f.controller.try_acquire().unwrap(),
+        );
+        assert!(!breaker.is_routable(), "probe in flight");
+        acc.resolve_probe_on_headers(StatusCode::OK);
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        assert!(
+            breaker.is_routable(),
+            "routable while the stream is still running"
+        );
+        acc.finish(Outcome::ClientDisconnect);
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        assert!(breaker.is_routable());
+    }
+
+    #[test]
+    fn probe_with_5xx_headers_waits_for_the_final_verdict() {
+        let f = probe_fixture();
+        let breaker = &f.backend.breaker;
+        breaker.record_failure(Admission::Normal);
+        breaker.advance(Duration::from_secs(2));
+        let adm = breaker.try_begin().unwrap();
+        let mut acc = RequestAccounting::start(
+            f.backend.clone(),
+            f.metrics.clone(),
+            "test".into(),
+            0.3,
+            adm,
+            f.controller.try_acquire().unwrap(),
+        );
+        acc.resolve_probe_on_headers(StatusCode::BAD_GATEWAY);
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
+        acc.finish(Outcome::Completed(StatusCode::BAD_GATEWAY));
+        assert_eq!(breaker.state(), CircuitState::Open);
+    }
+
+    #[tokio::test]
+    async fn close_right_after_done_counts_as_completed() {
+        let f = fixture();
+        let acc = start(&f);
+        let inner: ByteStream = Box::pin(futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(b"data: a\n\n")),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+        ]));
+        let mut stream = AccountedStream::new(inner, StatusCode::OK, acc);
+        stream.next().await.unwrap().unwrap();
+        stream.next().await.unwrap().unwrap();
+        drop(stream);
+        assert_eq!(f.controller.in_flight(), 0);
+        let text = f.metrics.encode();
+        assert!(text.contains("status=\"200\""), "{text}");
+        assert!(!text.contains("client_disconnect"), "{text}");
     }
 }
