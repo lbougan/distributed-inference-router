@@ -27,3 +27,8 @@ benchmarks/plots/
 # OS
 .DS_Store
 Thumbs.db
+
+# Working notes: every markdown file except the README stays local
+*.md
+!README.md
+docs/superpowers/
