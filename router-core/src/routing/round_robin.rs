@@ -9,6 +9,12 @@ pub struct RoundRobin {
     counter: AtomicUsize,
 }
 
+impl Default for RoundRobin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RoundRobin {
     pub fn new() -> Self {
         Self {

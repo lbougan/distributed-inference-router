@@ -35,6 +35,12 @@ pub struct RouterMetrics {
     pub registry: Arc<std::sync::Mutex<Registry>>,
 }
 
+impl Default for RouterMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RouterMetrics {
     pub fn new() -> Self {
         let mut registry = Registry::default();

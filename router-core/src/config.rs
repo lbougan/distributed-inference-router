@@ -183,9 +183,16 @@ fn default_metrics_path() -> String {
 }
 
 impl RouterConfig {
+    pub fn from_yaml(contents: &str) -> Result<Self, serde_yaml::Error> {
+        serde_yaml::from_str(contents)
+    }
+
+    pub fn listen_addr(&self) -> Result<std::net::SocketAddr, std::net::AddrParseError> {
+        format!("{}:{}", self.listen.host, self.listen.port).parse()
+    }
+
     pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
-        let config: Self = serde_yaml::from_str(&contents)?;
-        Ok(config)
+        Ok(Self::from_yaml(&contents)?)
     }
 }

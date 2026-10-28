@@ -55,6 +55,7 @@ pub async fn forward_request(
     for (key, value) in resp.headers().iter() {
         response_builder = response_builder.header(key.clone(), value.clone());
     }
+    response_builder = response_builder.header("x-router-backend", backend.url.as_str());
 
     if is_streaming {
         let stream = resp.bytes_stream().map(|chunk| {

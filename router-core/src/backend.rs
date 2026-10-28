@@ -103,4 +103,8 @@ impl BackendPool {
     pub fn len(&self) -> usize {
         self.backends.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
 }
