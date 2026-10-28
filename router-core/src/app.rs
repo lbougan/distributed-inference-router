@@ -20,7 +20,6 @@ pub const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct App {
     pub router: Router,
-    pub state: AppState,
     /// Dropping this handle detaches the task (it keeps running); `main.rs` relies on that.
     pub health_task: JoinHandle<()>,
 }
@@ -75,10 +74,9 @@ pub fn build_app(config: RouterConfig) -> Result<App, Box<dyn std::error::Error>
         ewma_alpha: config.routing.latency_aware.alpha,
     };
 
-    let router = server::build_router(state.clone(), &config.metrics);
+    let router = server::build_router(state, &config.metrics);
     Ok(App {
         router,
-        state,
         health_task,
     })
 }

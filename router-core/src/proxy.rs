@@ -2,6 +2,7 @@
 //! response so the caller can attach accounting to the body before replying.
 
 use std::pin::Pin;
+use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -39,12 +40,8 @@ pub struct Forwarded {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: ForwardedBody,
-}
-
-impl Forwarded {
-    pub fn is_streaming(&self) -> bool {
-        matches!(self.body, ForwardedBody::Stream(_))
-    }
+    /// When the backend's response headers arrived, before any buffered body was read.
+    pub headers_at: Instant,
 }
 
 fn is_hop_by_hop(name: &HeaderName) -> bool {
@@ -92,6 +89,7 @@ pub async fn forward_request(
             tracing::error!(backend = %backend.url, error = %e, "backend request failed");
             StatusCode::BAD_GATEWAY
         })?;
+    let headers_at = Instant::now();
 
     let status = resp.status();
     let headers = filter_headers(resp.headers());
@@ -107,6 +105,7 @@ pub async fn forward_request(
         status,
         headers,
         body,
+        headers_at,
     })
 }
 

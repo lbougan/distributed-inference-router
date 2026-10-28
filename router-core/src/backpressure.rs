@@ -48,10 +48,6 @@ impl BackpressureController {
     pub fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Relaxed)
     }
-
-    pub fn max_in_flight(&self) -> usize {
-        self.max_in_flight
-    }
 }
 
 #[cfg(test)]

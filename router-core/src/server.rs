@@ -207,7 +207,7 @@ async fn proxy_handler(
     .await
     {
         Ok(forwarded) => {
-            accounting.mark_headers_received();
+            accounting.mark_headers_received_at(forwarded.headers_at);
             Ok(into_response(forwarded, &backend.url, accounting))
         }
         Err(status) => {

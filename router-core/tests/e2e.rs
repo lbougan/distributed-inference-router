@@ -158,7 +158,12 @@ async fn metrics_endpoint_exposes_router_metrics() {
         .text()
         .await
         .unwrap();
-    assert!(text.contains("router_requests_total"));
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("router_requests_total{")),
+        "exact counter name: {text}"
+    );
+    assert!(!text.contains("_total_total"), "doubled suffix: {text}");
     assert_eq!(
         metric_value(&text, "router_backend_health", &m.url),
         Some(1.0)
@@ -167,6 +172,38 @@ async fn metrics_endpoint_exposes_router_metrics() {
         metric_value(&text, "router_active_connections", &m.url),
         Some(0.0)
     );
+
+    // A router whose only backend is down rejects with 503 and counts the rejection.
+    let down = spawn_mock("down").await;
+    let r2 = start_router(&[&down], RouterOpts::default()).await;
+    down.set_healthy(false);
+    wait_until(Duration::from_secs(5), "down marked unhealthy", || async {
+        backend_health(&c, &r2.url, &down.url).await == Some(0.0)
+    })
+    .await;
+    assert_eq!(post_chat(&c, &r2.url, "x").await.status(), 503);
+    let text = c
+        .get(format!("{}/metrics", r2.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("router_rejected_requests_total{")),
+        "exact rejection counter name: {text}"
+    );
+    assert_eq!(
+        metric_value(
+            &text,
+            "router_rejected_requests_total",
+            "no_routable_backend"
+        ),
+        Some(1.0)
+    );
+    assert!(!text.contains("_total_total"), "doubled suffix: {text}");
 }
 
 #[tokio::test]
@@ -263,20 +300,23 @@ async fn streaming_request_is_counted_until_the_stream_ends() {
             .await
             .unwrap()
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let mid = c
-        .get(format!("{}/metrics", r.url))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert_eq!(
-        metric_value(&mid, "router_active_connections", &m.url),
-        Some(1.0),
-        "mid-stream"
-    );
+    let metrics_url = format!("{}/metrics", r.url);
+    let fetch = || async {
+        c.get(&metrics_url)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    wait_until(
+        Duration::from_secs(2),
+        "stream counted as active",
+        || async { metric_value(&fetch().await, "router_active_connections", &m.url) == Some(1.0) },
+    )
+    .await;
+    let mid = fetch().await;
     assert_eq!(
         metric_value(&mid, "router_in_flight", ""),
         Some(1.0),

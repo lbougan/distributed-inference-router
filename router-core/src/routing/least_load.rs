@@ -9,7 +9,7 @@ use crate::backend::{Backend, BackendId};
 /// when several routers or direct clients share a replica.
 pub struct LeastLoad;
 
-pub fn load_of(b: &Backend) -> u64 {
+fn load_of(b: &Backend) -> u64 {
     b.active_connections.load(Ordering::Relaxed) as u64 + b.queue_depth.load(Ordering::Relaxed)
 }
 

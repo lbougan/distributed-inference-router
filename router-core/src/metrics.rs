@@ -49,8 +49,9 @@ impl RouterMetrics {
         let mut registry = Registry::default();
 
         let requests_total = Family::<RequestLabels, Counter>::default();
+        // prometheus-client appends `_total` to counters: this exports `router_requests_total`.
         registry.register(
-            "router_requests_total",
+            "router_requests",
             "Total requests routed",
             requests_total.clone(),
         );
@@ -102,7 +103,7 @@ impl RouterMetrics {
 
         let rejected_requests = Family::<RejectLabels, Counter>::default();
         registry.register(
-            "router_rejected_requests_total",
+            "router_rejected_requests",
             "Rejected requests by reason",
             rejected_requests.clone(),
         );

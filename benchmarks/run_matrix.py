@@ -129,6 +129,11 @@ async def set_mock_health(session: aiohttp.ClientSession, url: str, healthy: boo
         resp.raise_for_status()
 
 
+async def set_mock_fail_rate(session: aiohttp.ClientSession, url: str, rate: float) -> None:
+    async with session.post(f"{url}/admin/fail_rate", json={"rate": rate}) as resp:
+        resp.raise_for_status()
+
+
 async def mock_prefix_counters(session: aiohttp.ClientSession) -> dict[str, tuple[float, float]]:
     counters = {}
     for url in MOCK_URLS:
@@ -188,11 +193,14 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
 
             async def chaos_task() -> None:
                 await asyncio.sleep(scenario.kill_backend_at)
+                # A real failure: every request fails and /health reports 503.
                 log.info("killing %s", MOCK_URLS[0])
+                await set_mock_fail_rate(session, MOCK_URLS[0], 1.0)
                 await set_mock_health(session, MOCK_URLS[0], False)
                 if scenario.restore_backend_at is not None:
                     await asyncio.sleep(scenario.restore_backend_at - scenario.kill_backend_at)
                     log.info("restoring %s", MOCK_URLS[0])
+                    await set_mock_fail_rate(session, MOCK_URLS[0], 0.0)
                     await set_mock_health(session, MOCK_URLS[0], True)
 
             chaos = asyncio.create_task(chaos_task())
@@ -208,6 +216,7 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
                 chaos.cancel()
                 await asyncio.gather(chaos, return_exceptions=True)
             for url in MOCK_URLS:
+                await set_mock_fail_rate(session, url, 0.0)
                 await set_mock_health(session, url, True)
 
     deltas = {u: (after[u][0] - before[u][0], after[u][1] - before[u][1]) for u in MOCK_URLS}

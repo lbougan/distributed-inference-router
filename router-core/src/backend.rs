@@ -13,8 +13,6 @@ pub struct Backend {
     pub breaker: CircuitBreaker,
     pub healthy: AtomicBool,
     pub active_connections: AtomicUsize,
-    pub total_requests: AtomicU64,
-    pub total_failures: AtomicU64,
     /// EWMA latency in microseconds
     pub ewma_latency_us: AtomicU64,
     /// Queue depth scraped from backend /metrics
@@ -36,8 +34,6 @@ impl Backend {
             breaker,
             healthy: AtomicBool::new(true),
             active_connections: AtomicUsize::new(0),
-            total_requests: AtomicU64::new(0),
-            total_failures: AtomicU64::new(0),
             ewma_latency_us: AtomicU64::new(0),
             queue_depth: AtomicU64::new(0),
             kv_cache_usage_bp: AtomicU64::new(0),
@@ -68,14 +64,10 @@ impl Backend {
 
     pub fn record_request_start(&self) {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_request_end(&self, success: bool) {
+    pub fn record_request_end(&self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
-        if !success {
-            self.total_failures.fetch_add(1, Ordering::Relaxed);
-        }
     }
 
     pub fn update_ewma_latency(&self, latency_us: u64, alpha: f64) {
@@ -124,10 +116,6 @@ impl BackendPool {
         } else {
             under_limit
         }
-    }
-
-    pub fn get(&self, id: BackendId) -> Option<&Arc<Backend>> {
-        self.backends.get(id)
     }
 
     pub fn len(&self) -> usize {

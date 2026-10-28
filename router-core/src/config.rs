@@ -4,6 +4,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouterConfig {
+    #[serde(default)]
     pub listen: ListenConfig,
     pub routing: RoutingConfig,
     pub backends: Vec<BackendConfig>,
@@ -24,6 +25,15 @@ pub struct ListenConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+}
+
+impl Default for ListenConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_port(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -210,6 +220,9 @@ fn default_metrics_path() -> String {
     "/metrics".to_string()
 }
 
+/// Upper bound for `circuit_breaker.window_secs` (one hour).
+pub const MAX_WINDOW_SECS: u64 = 3600;
+
 #[derive(Debug)]
 pub enum ConfigError {
     Parse(serde_yaml::Error),
@@ -258,12 +271,30 @@ impl RouterConfig {
         if self.health_check.interval_secs < 1 {
             return Err("health_check.interval_secs must be >= 1".to_string());
         }
+        let window = self.circuit_breaker.window_secs;
+        if !(1..=MAX_WINDOW_SECS).contains(&window) {
+            return Err(format!(
+                "circuit_breaker.window_secs must be in 1..={MAX_WINDOW_SECS}, got {window}"
+            ));
+        }
+        if self.circuit_breaker.min_requests < 1 {
+            return Err("circuit_breaker.min_requests must be >= 1".to_string());
+        }
+        if self.backpressure.max_in_flight < 1 {
+            return Err("backpressure.max_in_flight must be >= 1".to_string());
+        }
         let path = &self.metrics.path;
         if !path.starts_with('/')
             || ["/health", "/v1/completions", "/v1/chat/completions"].contains(&path.as_str())
         {
             return Err(format!(
                 "metrics.path must start with '/' and not collide with a router route, got {path:?}"
+            ));
+        }
+        // axum would read these as path parameters or wildcards (or panic on them).
+        if path.contains(['{', '}', '*']) {
+            return Err(format!(
+                "metrics.path must be a literal path without '{{', '}}' or '*', got {path:?}"
             ));
         }
         if self.backends.is_empty() {
@@ -312,6 +343,15 @@ mod tests {
         assert_eq!(cfg.routing.latency_aware.alpha, 0.3);
         assert_eq!(cfg.backends[0].weight, 1);
         assert_eq!(cfg.circuit_breaker.min_requests, 5);
+    }
+
+    #[test]
+    fn listen_section_is_optional() {
+        let cfg = RouterConfig::from_yaml("routing: {}\nbackends:\n  - url: \"http://a:8000\"\n")
+            .unwrap();
+        assert_eq!(cfg.listen.host, "0.0.0.0");
+        assert_eq!(cfg.listen.port, 8080);
+        assert_eq!(cfg.listen_addr().unwrap(), "0.0.0.0:8080".parse().unwrap());
     }
 
     #[test]
@@ -399,12 +439,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_out_of_range_window_secs() {
+        for w in ["0", "3601"] {
+            rejects(
+                &format!("circuit_breaker:\n  window_secs: {w}\n"),
+                "window_secs",
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_window_secs_at_the_bounds() {
+        for w in [1, MAX_WINDOW_SECS] {
+            let yaml = format!(
+                "routing: {{}}\nbackends:{ONE_BACKEND}\ncircuit_breaker:\n  window_secs: {w}\n"
+            );
+            assert!(RouterConfig::from_yaml(&yaml).is_ok(), "{w}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_min_requests() {
+        rejects("circuit_breaker:\n  min_requests: 0\n", "min_requests");
+    }
+
+    #[test]
+    fn rejects_zero_max_in_flight() {
+        rejects("backpressure:\n  max_in_flight: 0\n", "max_in_flight");
+    }
+
+    #[test]
     fn rejects_bad_metrics_path() {
         for p in [
             "metrics",
             "/health",
             "/v1/completions",
             "/v1/chat/completions",
+            "/metrics/{id}",
+            "/metrics/}",
+            "/metrics/*rest",
         ] {
             rejects(&format!("metrics:\n  path: \"{p}\"\n"), "metrics.path");
         }

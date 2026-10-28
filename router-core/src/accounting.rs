@@ -45,7 +45,7 @@ impl Outcome {
     fn status_label(self) -> String {
         match self {
             Outcome::Completed(s) => s.as_u16().to_string(),
-            Outcome::TransportError => "502".to_string(),
+            Outcome::TransportError => "transport_error".to_string(),
             Outcome::StreamError => "stream_error".to_string(),
             Outcome::ClientDisconnect => "client_disconnect".to_string(),
         }
@@ -89,9 +89,9 @@ impl RequestAccounting {
         }
     }
 
-    /// Records the arrival of the backend's response headers (first byte), once.
-    pub fn mark_headers_received(&mut self) {
-        self.headers_at.get_or_insert_with(Instant::now);
+    /// Records when the backend's response headers arrived (first byte), once.
+    pub fn mark_headers_received_at(&mut self, at: Instant) {
+        self.headers_at.get_or_insert(at);
     }
 
     pub fn finish(mut self, outcome: Outcome) {
@@ -112,8 +112,7 @@ impl Drop for RequestAccounting {
             );
         }
 
-        self.backend
-            .record_request_end(!outcome.is_backend_failure());
+        self.backend.record_request_end();
 
         match outcome {
             Outcome::Completed(status) => {
@@ -254,17 +253,21 @@ mod tests {
         acc.finish(Outcome::Completed(StatusCode::OK));
         assert_eq!(f.backend.active_connections.load(Ordering::Relaxed), 0);
         assert_eq!(f.controller.in_flight(), 0);
-        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 0);
         assert!(f.backend.ewma_latency_us.load(Ordering::Relaxed) > 0);
         assert_eq!(f.backend.breaker.state(), CircuitState::Closed);
+        assert!(f.metrics.encode().contains("status=\"200\""));
     }
 
     #[test]
     fn completed_5xx_is_a_backend_failure() {
         let f = fixture();
         start(&f).finish(Outcome::Completed(StatusCode::BAD_GATEWAY));
-        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 1);
-        assert_eq!(f.backend.breaker.state(), CircuitState::Open);
+        assert_eq!(
+            f.backend.breaker.state(),
+            CircuitState::Open,
+            "one failure with min_requests 1 opens the circuit"
+        );
+        assert!(f.metrics.encode().contains("status=\"502\""));
         assert_eq!(
             f.backend.ewma_latency_us.load(Ordering::Relaxed),
             0,
@@ -276,8 +279,23 @@ mod tests {
     fn completed_4xx_is_not_a_backend_failure() {
         let f = fixture();
         start(&f).finish(Outcome::Completed(StatusCode::BAD_REQUEST));
-        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 0);
-        assert_eq!(f.backend.breaker.state(), CircuitState::Closed);
+        assert_eq!(
+            f.backend.breaker.state(),
+            CircuitState::Closed,
+            "a 4xx would have opened the circuit (min_requests 1) if it counted as a failure"
+        );
+        assert!(f.metrics.encode().contains("status=\"400\""));
+    }
+
+    #[test]
+    fn transport_error_is_a_backend_failure_with_its_own_label() {
+        let f = fixture();
+        start(&f).finish(Outcome::TransportError);
+        assert_eq!(f.backend.breaker.state(), CircuitState::Open);
+        assert_eq!(f.controller.in_flight(), 0);
+        let text = f.metrics.encode();
+        assert!(text.contains("status=\"transport_error\""), "{text}");
+        assert!(!text.contains("status=\"502\""), "{text}");
     }
 
     #[test]
@@ -285,7 +303,6 @@ mod tests {
         let f = fixture();
         drop(start(&f));
         assert_eq!(f.backend.active_connections.load(Ordering::Relaxed), 0);
-        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 0);
         assert_eq!(f.backend.breaker.state(), CircuitState::Closed);
         assert_eq!(f.backend.ewma_latency_us.load(Ordering::Relaxed), 0);
         assert!(f.metrics.encode().contains("status=\"client_disconnect\""));
@@ -334,7 +351,6 @@ mod tests {
             stream.next().await.is_none(),
             "stream is fused after an error"
         );
-        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 1);
         assert_eq!(f.backend.breaker.state(), CircuitState::Open);
         assert_eq!(f.controller.in_flight(), 0);
         assert!(f.metrics.encode().contains("status=\"stream_error\""));
@@ -352,7 +368,6 @@ mod tests {
         stream.next().await.unwrap().unwrap();
         drop(stream);
         assert_eq!(f.backend.active_connections.load(Ordering::Relaxed), 0);
-        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 0);
         assert_eq!(f.backend.breaker.state(), CircuitState::Closed);
         assert!(f.metrics.encode().contains("client_disconnect"));
         assert_eq!(f.controller.in_flight(), 0);
@@ -363,8 +378,7 @@ mod tests {
         let f = fixture();
         let mut acc = start(&f);
         acc.started = Instant::now() - Duration::from_millis(50);
-        acc.mark_headers_received();
-        acc.headers_at = Some(acc.started + Duration::from_millis(10));
+        acc.mark_headers_received_at(acc.started + Duration::from_millis(10));
         acc.finish(Outcome::Completed(StatusCode::OK));
         let ewma = f.backend.ewma_latency_us.load(Ordering::Relaxed);
         assert!((9_000..=11_000).contains(&ewma), "ewma was {ewma}");
