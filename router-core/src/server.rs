@@ -140,6 +140,8 @@ fn body_error_status(err: axum::Error) -> StatusCode {
 
 /// Ask the strategy for a backend among the routable ones; if its breaker refuses the
 /// request (half-open probe already taken), drop it from the candidates and ask again.
+/// If every under-limit candidate refuses, the request is rejected rather than retried on
+/// backends that are over the queue limit.
 fn select_backend(
     state: &AppState,
     incoming: &IncomingRequest,

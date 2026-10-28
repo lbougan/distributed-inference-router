@@ -21,6 +21,15 @@ pub trait RoutingStrategy: Send + Sync {
     fn select(&self, request: &IncomingRequest, routable: &[Arc<Backend>]) -> Option<BackendId>;
 }
 
+/// Every strategy name `create_strategy` accepts; config validation uses the same list.
+pub const STRATEGY_NAMES: [&str; 5] = [
+    "round_robin",
+    "least_connections",
+    "least_load",
+    "latency_aware",
+    "prefix_cache",
+];
+
 pub fn create_strategy(
     name: &str,
     prefix_token_count: usize,
@@ -37,6 +46,18 @@ pub fn create_strategy(
         )),
         other => return Err(format!("unknown routing strategy {other:?}")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_listed_strategy_name_can_be_created() {
+        for name in STRATEGY_NAMES {
+            assert!(create_strategy(name, 256, 3).is_ok(), "{name}");
+        }
+    }
 }
 
 #[cfg(test)]

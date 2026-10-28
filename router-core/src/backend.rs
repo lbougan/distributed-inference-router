@@ -117,7 +117,8 @@ impl BackendPool {
             .filter(|b| b.queue_depth.load(Ordering::Relaxed) <= self.max_queue_depth)
             .cloned()
             .collect();
-        // Soft limit: if every backend is busy, shed via the in-flight limit, not by refusing.
+        // Soft limit: when every live backend is over the queue limit they all stay routable and
+        // work queues on them; the in-flight budget, not the queue limit, bounds the router.
         if under_limit.is_empty() {
             available
         } else {

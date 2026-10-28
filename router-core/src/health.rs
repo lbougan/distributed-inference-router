@@ -41,9 +41,7 @@ async fn check_one(backend: Arc<Backend>, client: reqwest::Client, config: &Heal
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     };
-    apply_probe_result(&backend, healthy, config);
-    if !healthy {
-        reset_scraped(&backend);
+    if !record_probe(&backend, healthy, config) {
         return;
     }
 
@@ -73,10 +71,24 @@ async fn check_one(backend: Arc<Backend>, client: reqwest::Client, config: &Heal
     }
 }
 
-/// A successful scrape without the queue metric means no queue: clear any old depth.
+/// Records a probe result. Returns whether the backend should be scraped (the probe passed).
+/// Scraped values are cleared only once the backend is actually marked unhealthy.
+fn record_probe(backend: &Backend, healthy: bool, config: &HealthCheckConfig) -> bool {
+    apply_probe_result(backend, healthy, config);
+    if !healthy && !backend.is_healthy() {
+        reset_scraped(backend);
+    }
+    healthy
+}
+
+/// A successful scrape that lacks a metric means the backend reports none: clear any old value.
 fn apply_scrape(text: &str, backend: &Backend) {
-    if !parse_backend_metrics(text, backend) {
+    let found = parse_backend_metrics(text, backend);
+    if !found.queue_depth {
         backend.queue_depth.store(0, Ordering::Relaxed);
+    }
+    if !found.kv_cache {
+        backend.kv_cache_usage_bp.store(0, Ordering::Relaxed);
     }
 }
 
@@ -129,11 +141,18 @@ fn metric_value(line: &str) -> Option<f64> {
     line.split_whitespace().last()?.parse().ok()
 }
 
+/// Which scraped metrics a `/metrics` body contained.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScrapeFound {
+    pub queue_depth: bool,
+    pub kv_cache: bool,
+}
+
 /// Reads `vllm:num_requests_waiting` and `vllm:kv_cache_usage_perc`
 /// (or the pre-0.6 name `vllm:gpu_cache_usage_perc`). Exact-name match only.
-/// Returns whether the queue-depth metric was found.
-pub fn parse_backend_metrics(text: &str, backend: &Backend) -> bool {
-    let mut found_queue = false;
+/// Reports which of the two metrics were present.
+pub fn parse_backend_metrics(text: &str, backend: &Backend) -> ScrapeFound {
+    let mut found = ScrapeFound::default();
     for line in text.lines() {
         if line.starts_with('#') {
             continue;
@@ -144,7 +163,7 @@ pub fn parse_backend_metrics(text: &str, backend: &Backend) -> bool {
                     backend
                         .queue_depth
                         .store(v.max(0.0) as u64, Ordering::Relaxed);
-                    found_queue = true;
+                    found.queue_depth = true;
                 }
             }
             "vllm:kv_cache_usage_perc" | "vllm:gpu_cache_usage_perc" => {
@@ -152,12 +171,13 @@ pub fn parse_backend_metrics(text: &str, backend: &Backend) -> bool {
                     backend
                         .kv_cache_usage_bp
                         .store((v.clamp(0.0, 1.0) * 10_000.0) as u64, Ordering::Relaxed);
+                    found.kv_cache = true;
                 }
             }
             _ => {}
         }
     }
-    found_queue
+    found
 }
 
 #[cfg(test)]
@@ -193,11 +213,32 @@ mod tests {
     #[test]
     fn parse_returns_whether_queue_depth_was_found() {
         let b = backend();
-        assert!(parse_backend_metrics("vllm:num_requests_waiting 3\n", &b));
-        assert!(!parse_backend_metrics(
-            "vllm:num_requests_waiting_total 3\n",
-            &b
-        ));
+        assert!(parse_backend_metrics("vllm:num_requests_waiting 3\n", &b).queue_depth);
+        assert!(!parse_backend_metrics("vllm:num_requests_waiting_total 3\n", &b).queue_depth);
+    }
+
+    #[test]
+    fn absent_kv_metric_resets_usage() {
+        let b = backend();
+        b.kv_cache_usage_bp.store(5000, Ordering::Relaxed);
+        apply_scrape("vllm:num_requests_waiting 2\n", &b);
+        assert_eq!(b.kv_cache_usage_bp.load(Ordering::Relaxed), 0);
+        assert_eq!(b.queue_depth.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn scraped_values_reset_only_once_marked_down() {
+        let b = backend();
+        let cfg = HealthCheckConfig {
+            interval_secs: 1,
+            unhealthy_threshold: 2,
+            healthy_threshold: 2,
+        };
+        b.queue_depth.store(9, Ordering::Relaxed);
+        assert!(!record_probe(&b, false, &cfg));
+        assert_eq!(b.queue_depth.load(Ordering::Relaxed), 9);
+        assert!(!record_probe(&b, false, &cfg));
+        assert_eq!(b.queue_depth.load(Ordering::Relaxed), 0);
     }
 
     #[test]

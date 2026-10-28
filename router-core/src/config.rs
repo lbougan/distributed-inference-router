@@ -248,17 +248,10 @@ impl RouterConfig {
                 "circuit_breaker.failure_rate_threshold must be in (0, 1], got {rate}"
             ));
         }
-        const STRATEGIES: [&str; 5] = [
-            "round_robin",
-            "least_connections",
-            "least_load",
-            "latency_aware",
-            "prefix_cache",
-        ];
-        if !STRATEGIES.contains(&self.routing.strategy.as_str()) {
+        if !crate::routing::STRATEGY_NAMES.contains(&self.routing.strategy.as_str()) {
             return Err(format!(
                 "routing.strategy must be one of {}, got {:?}",
-                STRATEGIES.join(", "),
+                crate::routing::STRATEGY_NAMES.join(", "),
                 self.routing.strategy
             ));
         }
