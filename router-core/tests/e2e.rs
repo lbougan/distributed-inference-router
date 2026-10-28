@@ -244,3 +244,80 @@ async fn open_circuit_backend_is_skipped_not_503() {
         Some(2.0)
     );
 }
+
+#[tokio::test]
+async fn streaming_request_is_counted_until_the_stream_ends() {
+    let m = spawn_mock("m1").await;
+    m.set_stream(5, 150);
+    let r = start_router(&[&m], RouterOpts::default()).await;
+    let c = client();
+    let url = r.url.clone();
+    let c2 = c.clone();
+    let streaming = tokio::spawn(async move {
+        c2.post(format!("{url}/v1/chat/completions"))
+            .json(&chat_body("stream", true))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mid = c
+        .get(format!("{}/metrics", r.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        metric_value(&mid, "router_active_connections", &m.url),
+        Some(1.0),
+        "mid-stream"
+    );
+    assert_eq!(
+        metric_value(&mid, "router_in_flight", ""),
+        Some(1.0),
+        "mid-stream in_flight"
+    );
+
+    let text = streaming.await.unwrap();
+    assert!(text.ends_with("data: [DONE]\n\n"));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let after = c
+        .get(format!("{}/metrics", r.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        metric_value(&after, "router_active_connections", &m.url),
+        Some(0.0)
+    );
+    assert_eq!(metric_value(&after, "router_in_flight", ""), Some(0.0));
+    assert!(
+        after.contains("status=\"200\""),
+        "completed stream recorded as 200: {after}"
+    );
+}
+
+#[tokio::test]
+async fn oversized_body_returns_413() {
+    let m = spawn_mock("m1").await;
+    let r = start_router(&[&m], RouterOpts::default()).await;
+    let resp = client()
+        .post(format!("{}/v1/chat/completions", r.url))
+        .json(&serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "x".repeat(11 * 1024 * 1024)}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 413);
+    assert_eq!(m.requests(), 0);
+}

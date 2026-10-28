@@ -1,5 +1,6 @@
 //! Distributed LLM inference router: routes OpenAI-compatible requests across vLLM replicas.
 
+pub mod accounting;
 pub mod app;
 pub mod backend;
 pub mod backpressure;

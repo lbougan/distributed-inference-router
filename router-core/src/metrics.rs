@@ -32,6 +32,7 @@ pub struct RouterMetrics {
     pub circuit_breaker_state: Family<BackendLabels, Gauge>,
     pub backend_health: Family<BackendLabels, Gauge>,
     pub rejected_requests: Family<RejectLabels, Counter>,
+    pub in_flight: Gauge,
     pub registry: Arc<std::sync::Mutex<Registry>>,
 }
 
@@ -89,6 +90,13 @@ impl RouterMetrics {
             rejected_requests.clone(),
         );
 
+        let in_flight = Gauge::default();
+        registry.register(
+            "router_in_flight",
+            "Requests currently admitted by the router",
+            in_flight.clone(),
+        );
+
         Self {
             requests_total,
             request_duration,
@@ -96,6 +104,7 @@ impl RouterMetrics {
             circuit_breaker_state,
             backend_health,
             rejected_requests,
+            in_flight,
             registry: Arc::new(std::sync::Mutex::new(registry)),
         }
     }

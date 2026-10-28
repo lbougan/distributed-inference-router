@@ -101,6 +101,10 @@ impl CircuitBreaker {
         }
     }
 
+    /// The request ended without a verdict (client disconnected). Task 6 uses this to
+    /// hand back the half-open probe; today there is nothing to release.
+    pub fn abandon(&self) {}
+
     pub fn record_success(&self) {
         self.maybe_reset_window();
         self.success_count.fetch_add(1, Ordering::Relaxed);
