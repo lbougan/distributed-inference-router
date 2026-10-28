@@ -1,0 +1,6 @@
+router-core/target/
+.venv/
+.git/
+docs/
+*.md
+!README.md

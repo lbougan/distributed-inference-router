@@ -73,7 +73,7 @@ class TestFailover:
                         success += 1
                         backend = resp.headers.get("X-Backend-ID", "")
                         backends_seen.add(backend)
-            except Exception:  # noqa: BLE001, S110
+            except Exception:
                 pass
 
         # Restore health
@@ -102,7 +102,7 @@ class TestFailover:
                     if resp.status == 200:
                         backend = resp.headers.get("X-Backend-ID", "")
                         backends_seen.add(backend)
-            except Exception:  # noqa: BLE001, S110
+            except Exception:
                 pass
 
         assert "mock-2" in backends_seen, "Recovered backend should re-enter rotation"
@@ -143,7 +143,7 @@ class TestCircuitBreaker:
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     pass
-            except Exception:  # noqa: BLE001, S110
+            except Exception:
                 pass
 
         # Check metrics for circuit breaker state

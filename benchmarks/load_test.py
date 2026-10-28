@@ -98,7 +98,7 @@ async def send_request(
                     backend=backend,
                     strategy=config.strategy,
                 )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             end = time.monotonic()
             return RequestResult(
                 start_time=start,

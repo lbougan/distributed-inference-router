@@ -50,7 +50,7 @@ def plot_latency_comparison(all_stats: dict[str, dict], output: Path):
     for i, pctl in enumerate(percentiles):
         values = [all_stats[s].get(pctl, 0) for s in strategies]
         bars = ax.bar(x + i * width, values, width, label=pctl)
-        for bar, val in zip(bars, values):
+        for bar, val in zip(bars, values, strict=True):
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + 0.5,
@@ -79,7 +79,7 @@ def plot_throughput_comparison(all_stats: dict[str, dict], output: Path):
 
     fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.bar(strategies, throughputs, color=["#2196F3", "#4CAF50", "#FF9800", "#9C27B0"])
-    for bar, val in zip(bars, throughputs):
+    for bar, val in zip(bars, throughputs, strict=True):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 1,
