@@ -80,6 +80,8 @@ def markdown_table(runs: list[dict]) -> str:
         share = ", ".join(
             f"{k.rsplit('/', 1)[-1].split(':')[0]} {v:.0%}" for k, v in s["backend_share"].items()
         )
+        if list(s["backend_share"]) == ["unknown"]:
+            share = "-"
         phr = run["meta"].get("prefix_hit_rate_total")
         hit = f"{phr:.0%}" if phr is not None else "-"
         rows.append(

@@ -9,6 +9,7 @@ import asyncio
 import json
 import random
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -123,6 +124,14 @@ async def rate_limit_refiller(rate_limiter: asyncio.Semaphore, rps: float):
             last = now
 
 
+def _top_up(tasks: set, target: int, spawn: Callable[[], asyncio.Task]) -> None:
+    """Spawn tasks until the in-flight pool holds `target` of them."""
+    while len(tasks) < target:
+        task = spawn()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+
 async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
     semaphore = asyncio.Semaphore(config.concurrency)
     rate_limiter = None
@@ -140,12 +149,13 @@ async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
             tasks = set()
 
             while time.monotonic() < deadline:
-                if len(tasks) < config.concurrency * 2:
-                    task = asyncio.create_task(
+                _top_up(
+                    tasks,
+                    config.concurrency,
+                    lambda: asyncio.create_task(
                         send_request(session, config, semaphore, rate_limiter)
-                    )
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
+                    ),
+                )
 
                 done, _ = await asyncio.wait(
                     tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED

@@ -53,7 +53,10 @@ SCENARIOS = [
             "least_load",
             "latency_aware",
             "prefix_cache",
-            "direct",  # same load straight at mock-2, no router: the router-overhead reference
+            # Router overhead = router_single_mock-2 minus direct_mock-2 at equal concurrency (16).
+            # The multi-backend rows spread the load, so they are not comparable to `direct`.
+            "direct",  # straight at mock-2, no router
+            "router_single",  # router with only mock-2 behind it, round_robin
         ),
         load={"concurrency": 50, "total_requests": 2000},
     ),
@@ -80,11 +83,11 @@ SCENARIOS = [
 ]
 
 
-def router_config(strategy: str, overrides: dict) -> dict:
+def router_config(strategy: str, overrides: dict, backends: list[str] = BACKENDS) -> dict:
     cfg = {
         "listen": {"host": "0.0.0.0", "port": 8080},
         "routing": {"strategy": strategy, "prefix_cache": {"prefix_token_count": 256}},
-        "backends": [{"url": u, "weight": 1} for u in BACKENDS],
+        "backends": [{"url": u, "weight": 1} for u in backends],
         "health_check": {"interval_secs": 2, "unhealthy_threshold": 2, "healthy_threshold": 2},
         "circuit_breaker": {
             "failure_rate_threshold": 0.5,
@@ -139,11 +142,26 @@ async def mock_prefix_counters(session: aiohttp.ClientSession) -> dict[str, tupl
     return counters
 
 
+SINGLE_BACKEND_CONCURRENCY = 16
+
+
 async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
     direct = strategy == "direct"
+    single = strategy == "router_single"
+    label = {"direct": "direct_mock-2", "router_single": "router_single_mock-2"}.get(
+        strategy, strategy
+    )
+    load = dict(scenario.load)
+    if direct or single:
+        load["concurrency"] = SINGLE_BACKEND_CONCURRENCY
     if not direct:
         config_path = REPO / "benchmarks" / f".router-config.{scenario.name}.{strategy}.yaml"
-        config_path.write_text(yaml.safe_dump(router_config(strategy, scenario.router)))
+        cfg = router_config(
+            "round_robin" if single else strategy,
+            scenario.router,
+            [BACKENDS[1]] if single else BACKENDS,
+        )
+        config_path.write_text(yaml.safe_dump(cfg))
         restart_router(config_path)
 
     async with aiohttp.ClientSession() as session:
@@ -156,11 +174,11 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
 
         # Note: absolute p50s sit below the mocks' base latency because repeated prompts hit
         # the mock's prefix cache (~40% faster). That is also why baseline/round_robin p50 is
-        # ~40 ms rather than 60 ms. Compare baseline/round_robin against this direct row.
+        # ~40 ms rather than 60 ms.
         bench = BenchmarkConfig(
             router_url=MOCK_URLS[1] if direct else ROUTER_URL,
-            strategy="direct_mock-2" if direct else strategy,
-            **scenario.load,
+            strategy=label,
+            **load,
         )
         chaos = None
         if scenario.kill_backend_at is not None:
@@ -187,9 +205,9 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
     total_q = sum(q for _, q in deltas.values())
     meta = {
         "scenario": scenario.name,
-        "strategy": "direct_mock-2" if direct else strategy,
+        "strategy": label,
         "repeat": repeat,
-        "load": scenario.load,
+        "load": load,
         "router": scenario.router,
         "prefix_hit_rate": {u: (h / q if q else 0.0) for u, (h, q) in deltas.items()},
         "prefix_hit_rate_total": (sum(h for h, _ in deltas.values()) / total_q if total_q else 0.0),
