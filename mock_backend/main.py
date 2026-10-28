@@ -32,6 +32,16 @@ KV_DECAY_SECS = float(os.environ.get("KV_DECAY_SECS", "10"))
 KV_PER_REQUEST = float(os.environ.get("KV_PER_REQUEST", "0.02"))
 PREFIX_CACHE_SIZE = int(os.environ.get("PREFIX_CACHE_SIZE", "256"))
 PREFIX_KEY_CHARS = 64
+
+
+def _validate_settings() -> None:
+    if MAX_CONCURRENT < 1:
+        raise SystemExit(f"MAX_CONCURRENT must be >= 1, got {MAX_CONCURRENT}")
+    if KV_DECAY_SECS <= 0:
+        raise SystemExit(f"KV_DECAY_SECS must be > 0, got {KV_DECAY_SECS}")
+
+
+_validate_settings()
 PREFIX_HIT_SPEEDUP = 0.6  # a cache hit skips prefill: 40 % faster
 
 SAMPLE_TOKENS = [
@@ -217,14 +227,21 @@ def make_stream_chunk(request_id: str, token: str, is_chat: bool, finish: bool =
 
 
 async def generate_stream(request_id: str, is_chat: bool, tokens: list[str]):
-    try:
-        for token in tokens:
-            await asyncio.sleep(random.uniform(0.01, 0.05))
-            yield make_stream_chunk(request_id, token, is_chat)
-        yield make_stream_chunk(request_id, "", is_chat, finish=True)
-        yield "data: [DONE]\n\n"
-    finally:
-        gate.release()
+    for token in tokens:
+        await asyncio.sleep(random.uniform(0.01, 0.05))
+        yield make_stream_chunk(request_id, token, is_chat)
+    yield make_stream_chunk(request_id, "", is_chat, finish=True)
+    yield "data: [DONE]\n\n"
+
+
+class GatedStreamingResponse(StreamingResponse):
+    """Releases the concurrency slot when the response is finished or cancelled."""
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            gate.release()
 
 
 async def handle_completion(req: CompletionRequest, is_chat: bool):
@@ -248,8 +265,8 @@ async def handle_completion(req: CompletionRequest, is_chat: bool):
         headers = {"X-Backend-ID": INSTANCE_ID, "X-Prefix-Cache": "hit" if hit else "miss"}
 
         if req.stream:
-            released = True  # the generator releases the gate when the stream ends
-            return StreamingResponse(
+            released = True  # GatedStreamingResponse releases the gate when the stream ends
+            return GatedStreamingResponse(
                 generate_stream(request_id, is_chat, tokens),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", **headers},
@@ -297,7 +314,8 @@ async def set_fail_rate(request: Request):
 
 @app.get("/metrics")
 async def metrics():
-    inst = f'{{instance="{INSTANCE_ID}"}}'
+    label = INSTANCE_ID.replace("\\", "\\\\").replace('"', '\\"')
+    inst = f'{{instance="{label}"}}'
     lines = [
         "# TYPE vllm:num_requests_running gauge",
         f"vllm:num_requests_running{inst} {gate.running}",

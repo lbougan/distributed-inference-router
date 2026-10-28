@@ -35,7 +35,7 @@ jobs:
       - run: uv sync --locked --all-extras
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest -m "not docker" -q || [ $? -eq 5 ]
+      - run: uv run pytest -q
 
   compose-smoke:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'

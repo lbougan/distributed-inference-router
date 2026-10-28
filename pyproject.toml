@@ -33,7 +33,8 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["docker: needs the docker compose mock stack running"]
+addopts = "-m 'not docker'"
+markers = ["docker: needs the docker compose mock stack running (run with pytest -m docker)"]
 
 [tool.ruff]
 line-length = 100
