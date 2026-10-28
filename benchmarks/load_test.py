@@ -112,16 +112,18 @@ async def send_request(
 
 
 async def rate_limit_refiller(rate_limiter: asyncio.Semaphore, rps: float):
-    """Token bucket: refills the rate limiter at the configured RPS."""
+    """Token bucket with fractional credit; bursts are capped at one second of tokens."""
+    credit = 0.0
     last = time.monotonic()
     while True:
         await asyncio.sleep(0.05)
         now = time.monotonic()
-        tokens = min(int(rps * (now - last)), int(rps))
-        if tokens > 0:
-            for _ in range(tokens):
-                rate_limiter.release()
-            last = now
+        credit = min(credit + rps * (now - last), rps)
+        last = now
+        tokens = int(credit)
+        for _ in range(tokens):
+            rate_limiter.release()
+        credit -= tokens
 
 
 def _top_up(tasks: set, target: int, spawn: Callable[[], asyncio.Task]) -> None:
@@ -129,7 +131,6 @@ def _top_up(tasks: set, target: int, spawn: Callable[[], asyncio.Task]) -> None:
     while len(tasks) < target:
         task = spawn()
         tasks.add(task)
-        task.add_done_callback(tasks.discard)
 
 
 async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
@@ -157,16 +158,17 @@ async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
                     ),
                 )
 
-                done, _ = await asyncio.wait(
+                done, tasks = await asyncio.wait(
                     tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
                 )
-                for t in done:
-                    results.append(t.result())
+                results.extend(t.result() for t in done)
 
             if tasks:
-                done, _ = await asyncio.wait(tasks, timeout=10)
-                for t in done:
-                    results.append(t.result())
+                done, pending = await asyncio.wait(tasks, timeout=10)
+                results.extend(t.result() for t in done)
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         else:
             tasks = [
                 send_request(session, config, semaphore, rate_limiter)

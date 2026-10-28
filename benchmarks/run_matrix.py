@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Run the strategy x scenario benchmark matrix against the compose mock stack and write
-benchmarks/results/<scenario>_<strategy>.json. Then: python -m benchmarks.analyze
-benchmarks/results/*.json --markdown --update-readme README.md
+benchmarks/results/<scenario>_<strategy>_r<repeat>.json. Then: python -m benchmarks.analyze
+benchmarks/results/*_r0.json --markdown --update-readme README.md
+The suggested analyze command uses repeat 0 only: run with --repeats 1 for a README table, or
+pick the median repeat by hand.
 
 Each (scenario, strategy) pair restarts the router container with a generated config so the
 strategy and backpressure limits are exactly what the row claims.
@@ -116,7 +118,7 @@ async def wait_healthy(session: aiohttp.ClientSession, url: str, timeout_s: floa
             async with session.get(f"{url}/health", timeout=aiohttp.ClientTimeout(total=2)) as resp:
                 if resp.status == 200:
                     return
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, TimeoutError):
             pass
         await asyncio.sleep(0.5)
     raise RuntimeError(f"{url} not healthy after {timeout_s}s")
@@ -154,6 +156,7 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
     load = dict(scenario.load)
     if direct or single:
         load["concurrency"] = SINGLE_BACKEND_CONCURRENCY
+    cfg = None
     if not direct:
         config_path = REPO / "benchmarks" / f".router-config.{scenario.name}.{strategy}.yaml"
         cfg = router_config(
@@ -194,12 +197,18 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
 
             chaos = asyncio.create_task(chaos_task())
 
-        before = await mock_prefix_counters(session)
-        results = await run_benchmark(bench)
-        if chaos:
-            await chaos
-        after = await mock_prefix_counters(session)
-        await set_mock_health(session, MOCK_URLS[0], True)
+        try:
+            before = await mock_prefix_counters(session)
+            results = await run_benchmark(bench)
+            if chaos:
+                await chaos
+            after = await mock_prefix_counters(session)
+        finally:
+            if chaos:
+                chaos.cancel()
+                await asyncio.gather(chaos, return_exceptions=True)
+            for url in MOCK_URLS:
+                await set_mock_health(session, url, True)
 
     deltas = {u: (after[u][0] - before[u][0], after[u][1] - before[u][1]) for u in MOCK_URLS}
     total_q = sum(q for _, q in deltas.values())
@@ -209,10 +218,11 @@ async def run_one(scenario: Scenario, strategy: str, repeat: int) -> Path:
         "repeat": repeat,
         "load": load,
         "router": scenario.router,
+        "router_config": None if direct else cfg,
         "prefix_hit_rate": {u: (h / q if q else 0.0) for u, (h, q) in deltas.items()},
         "prefix_hit_rate_total": (sum(h for h, _ in deltas.values()) / total_q if total_q else 0.0),
         "router_commit": subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=False
+            ["git", "describe", "--always", "--dirty"], capture_output=True, text=True, check=False
         ).stdout.strip(),
     }
     out = RESULTS_DIR / f"{scenario.name}_{strategy}_r{repeat}.json"

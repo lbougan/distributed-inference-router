@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from benchmarks import analyze
 
 
@@ -66,3 +68,10 @@ def test_update_readme_replaces_only_the_marked_block(tmp_path: Path):
     assert "old" not in text
     assert "abc1234" in text
     assert text.endswith("<!-- BENCH:END -->\noutro\n")
+
+
+def test_update_readme_rejects_missing_markers(tmp_path: Path):
+    readme = tmp_path / "README.md"
+    readme.write_text("no markers here\n")
+    with pytest.raises(ValueError, match="BENCH:START"):
+        analyze.update_readme(readme, "| a |\n", commit="abc1234")
