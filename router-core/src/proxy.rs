@@ -98,7 +98,10 @@ pub async fn forward_request(
     let body = if is_event_stream(&headers) {
         ForwardedBody::Stream(Box::pin(resp.bytes_stream()))
     } else {
-        ForwardedBody::Full(resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?)
+        ForwardedBody::Full(resp.bytes().await.map_err(|e| {
+            tracing::error!(backend = %backend.url, error = %e, "reading backend response body failed");
+            StatusCode::BAD_GATEWAY
+        })?)
     };
     Ok(Forwarded {
         status,

@@ -5,20 +5,29 @@ use std::cmp::Ordering as Ordering2;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get};
 use axum::{Json, Router};
 use futures_util::stream;
 use serde_json::{json, Value};
 
+/// What the most recent completion request looked like when it reached the mock.
+#[derive(Default, Clone)]
+pub struct LastRequest {
+    pub method: Option<String>,
+    pub authorization: Option<String>,
+    pub had_connection_header: bool,
+}
+
 #[derive(Clone)]
 pub struct MockState {
+    pub last: Arc<Mutex<LastRequest>>,
     pub id: String,
     pub healthy: Arc<AtomicBool>,
     pub fail: Arc<AtomicBool>,
@@ -65,6 +74,15 @@ impl MockHandle {
     pub fn set_kv_usage_bp(&self, v: u64) {
         self.state.kv_usage_bp.store(v, Ordering::SeqCst);
     }
+    pub fn last_method(&self) -> Option<String> {
+        self.state.last.lock().unwrap().method.clone()
+    }
+    pub fn last_authorization(&self) -> Option<String> {
+        self.state.last.lock().unwrap().authorization.clone()
+    }
+    pub fn last_had_connection_header(&self) -> bool {
+        self.state.last.lock().unwrap().had_connection_header
+    }
     pub fn requests(&self) -> usize {
         self.state.requests.load(Ordering::SeqCst)
     }
@@ -77,6 +95,7 @@ impl MockHandle {
 
 pub async fn spawn_mock(id: &str) -> MockHandle {
     let state = MockState {
+        last: Arc::new(Mutex::new(LastRequest::default())),
         id: id.to_string(),
         healthy: Arc::new(AtomicBool::new(true)),
         fail: Arc::new(AtomicBool::new(false)),
@@ -89,8 +108,8 @@ pub async fn spawn_mock(id: &str) -> MockHandle {
         in_flight: Arc::new(AtomicUsize::new(0)),
     };
     let app = Router::new()
-        .route("/v1/chat/completions", post(completion))
-        .route("/v1/completions", post(completion))
+        .route("/v1/chat/completions", any(completion))
+        .route("/v1/completions", any(completion))
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .with_state(state.clone());
@@ -114,7 +133,21 @@ impl Drop for InFlight {
     }
 }
 
-async fn completion(State(s): State<MockState>, Json(body): Json<Value>) -> Response {
+async fn completion(
+    State(s): State<MockState>,
+    method: Method,
+    headers: HeaderMap,
+    raw: Bytes,
+) -> Response {
+    let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+    *s.last.lock().unwrap() = LastRequest {
+        method: Some(method.to_string()),
+        authorization: headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+        had_connection_header: headers.contains_key(header::CONNECTION),
+    };
     s.requests.fetch_add(1, Ordering::SeqCst);
     s.in_flight.fetch_add(1, Ordering::SeqCst);
     let guard = InFlight(s.in_flight.clone());
@@ -134,7 +167,10 @@ async fn completion(State(s): State<MockState>, Json(body): Json<Value>) -> Resp
         drop(guard);
         return (
             StatusCode::OK,
-            [("x-mock-backend", s.id.clone())],
+            [
+                ("x-mock-backend", s.id.clone()),
+                ("x-router-backend", "spoofed".to_string()),
+            ],
             Json(json!({
                 "id": "cmpl-mock",
                 "object": "chat.completion",
@@ -162,6 +198,7 @@ async fn completion(State(s): State<MockState>, Json(body): Json<Value>) -> Resp
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header("x-mock-backend", s.id.clone())
+        .header("x-router-backend", "spoofed")
         .body(Body::from_stream(chunks))
         .unwrap()
 }

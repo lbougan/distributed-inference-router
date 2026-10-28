@@ -203,9 +203,51 @@ fn default_metrics_path() -> String {
     "/metrics".to_string()
 }
 
+#[derive(Debug)]
+pub enum ConfigError {
+    Parse(serde_yaml::Error),
+    Invalid(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(e) => write!(f, "invalid config syntax: {e}"),
+            Self::Invalid(msg) => write!(f, "invalid config: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
 impl RouterConfig {
-    pub fn from_yaml(contents: &str) -> Result<Self, serde_yaml::Error> {
-        serde_yaml::from_str(contents)
+    pub fn from_yaml(contents: &str) -> Result<Self, ConfigError> {
+        let cfg: Self = serde_yaml::from_str(contents).map_err(ConfigError::Parse)?;
+        cfg.validate().map_err(ConfigError::Invalid)?;
+        Ok(cfg)
+    }
+
+    /// Reject configs that would misbehave at runtime instead of failing at startup.
+    pub fn validate(&self) -> Result<(), String> {
+        let alpha = self.routing.latency_aware.alpha;
+        if !alpha.is_finite() || alpha <= 0.0 || alpha > 1.0 {
+            return Err(format!(
+                "routing.latency_aware.alpha must be in (0, 1], got {alpha}"
+            ));
+        }
+        if self.backends.is_empty() {
+            return Err("backends must not be empty".to_string());
+        }
+        for b in &self.backends {
+            let scheme_ok = b.url.starts_with("http://") || b.url.starts_with("https://");
+            if !scheme_ok || http::HeaderValue::from_str(&b.url).is_err() {
+                return Err(format!(
+                    "backend url {:?} must start with http:// or https:// and contain no control characters",
+                    b.url
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn listen_addr(&self) -> Result<std::net::SocketAddr, std::net::AddrParseError> {
@@ -238,9 +280,38 @@ mod tests {
     #[test]
     fn latency_aware_alpha_is_configurable() {
         let cfg = RouterConfig::from_yaml(
-            "listen: {}\nrouting:\n  strategy: latency_aware\n  latency_aware:\n    alpha: 0.5\nbackends: []\n",
+            "listen: {}\nrouting:\n  strategy: latency_aware\n  latency_aware:\n    alpha: 0.5\nbackends:\n  - url: \"http://a:8000\"\n",
         )
         .unwrap();
         assert_eq!(cfg.routing.latency_aware.alpha, 0.5);
+    }
+
+    fn yaml_with(alpha: &str, backends: &str) -> String {
+        format!(
+            "listen: {{}}\nrouting:\n  latency_aware:\n    alpha: {alpha}\nbackends: {backends}\n"
+        )
+    }
+
+    const ONE_BACKEND: &str = "\n  - url: \"http://a:8000\"";
+
+    #[test]
+    fn rejects_out_of_range_alpha() {
+        for alpha in ["0", "1.5", ".nan"] {
+            let err = RouterConfig::from_yaml(&yaml_with(alpha, ONE_BACKEND)).unwrap_err();
+            assert!(err.to_string().contains("alpha"), "{alpha}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_empty_backends() {
+        let err = RouterConfig::from_yaml(&yaml_with("0.3", "[]")).unwrap_err();
+        assert!(err.to_string().contains("backends"), "{err}");
+    }
+
+    #[test]
+    fn rejects_backend_url_with_newline() {
+        let err = RouterConfig::from_yaml(&yaml_with("0.3", "\n  - url: \"http://a:8000\\nx\""))
+            .unwrap_err();
+        assert!(err.to_string().contains("url"), "{err}");
     }
 }

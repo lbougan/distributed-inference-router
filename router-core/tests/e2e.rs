@@ -168,3 +168,31 @@ async fn metrics_endpoint_exposes_router_metrics() {
         Some(0.0)
     );
 }
+
+#[tokio::test]
+async fn method_and_auth_header_are_forwarded_unchanged() {
+    let m = spawn_mock("m1").await;
+    let r = start_router(&[&m], RouterOpts::default()).await;
+    // The router only mounts /v1/completions and /v1/chat/completions; send a GET there.
+    let resp = client()
+        .get(format!("{}/v1/completions", r.url))
+        .header("authorization", "Bearer secret")
+        .header("connection", "keep-alive")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(m.last_method().as_deref(), Some("GET"));
+    assert_eq!(m.last_authorization().as_deref(), Some("Bearer secret"));
+    assert!(!m.last_had_connection_header());
+}
+
+#[tokio::test]
+async fn upstream_x_router_backend_header_is_replaced() {
+    let m = spawn_mock("m1").await;
+    let r = start_router(&[&m], RouterOpts::default()).await;
+    let resp = post_chat(&client(), &r.url, "x").await;
+    let values: Vec<_> = resp.headers().get_all("x-router-backend").iter().collect();
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0], m.url.as_str());
+}
