@@ -3,29 +3,20 @@ pub mod least_connections;
 pub mod prefix_cache;
 pub mod round_robin;
 
-use async_trait::async_trait;
-use std::time::Duration;
+use std::sync::Arc;
 
-use crate::backend::{BackendId, BackendPool};
+use crate::backend::{Backend, BackendId};
 
-/// Minimal representation of an incoming request for routing decisions.
-#[allow(dead_code)]
+/// What a strategy may look at when choosing a backend.
 pub struct IncomingRequest {
     pub path: String,
     pub body: Option<serde_json::Value>,
 }
 
-#[async_trait]
+/// Pick one of the routable backends. `routable` is never empty when called.
+/// Strategies are pure selectors; accounting is the router's job.
 pub trait RoutingStrategy: Send + Sync {
-    /// Select a healthy backend for the given request.
-    async fn select_backend(
-        &self,
-        request: &IncomingRequest,
-        pool: &BackendPool,
-    ) -> Option<BackendId>;
-
-    /// Notify the strategy that a request completed so it can update internal state.
-    fn on_request_complete(&self, backend: BackendId, latency: Duration, success: bool);
+    fn select(&self, request: &IncomingRequest, routable: &[Arc<Backend>]) -> Option<BackendId>;
 }
 
 pub fn create_strategy(name: &str, prefix_token_count: usize) -> Box<dyn RoutingStrategy> {
@@ -40,6 +31,32 @@ pub fn create_strategy(name: &str, prefix_token_count: usize) -> Box<dyn Routing
                 "Unknown strategy, falling back to round_robin"
             );
             Box::new(round_robin::RoundRobin::new())
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::circuit_breaker::CircuitBreaker;
+
+    pub fn backends(n: usize) -> Vec<Arc<Backend>> {
+        (0..n)
+            .map(|i| {
+                Arc::new(Backend::new(
+                    i,
+                    format!("http://backend-{i}:8000"),
+                    1,
+                    CircuitBreaker::default(),
+                ))
+            })
+            .collect()
+    }
+
+    pub fn req() -> IncomingRequest {
+        IncomingRequest {
+            path: "/v1/completions".into(),
+            body: None,
         }
     }
 }

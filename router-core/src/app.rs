@@ -32,22 +32,16 @@ pub fn build_app(config: RouterConfig) -> Result<App, Box<dyn std::error::Error>
         .backends
         .iter()
         .enumerate()
-        .map(|(i, bc)| Arc::new(Backend::new(i, bc.url.clone(), bc.weight)))
+        .map(|(i, bc)| {
+            Arc::new(Backend::new(
+                i,
+                bc.url.clone(),
+                bc.weight,
+                CircuitBreaker::from_config(&config.circuit_breaker),
+            ))
+        })
         .collect();
     let pool = Arc::new(BackendPool::new(backends));
-
-    let circuit_breakers: Arc<Vec<CircuitBreaker>> = Arc::new(
-        (0..pool.len())
-            .map(|_| {
-                CircuitBreaker::new(
-                    config.circuit_breaker.failure_rate_threshold,
-                    config.circuit_breaker.min_requests,
-                    config.circuit_breaker.window_secs,
-                    config.circuit_breaker.open_duration_secs,
-                )
-            })
-            .collect(),
-    );
 
     let strategy = routing::create_strategy(
         &config.routing.strategy,
@@ -64,19 +58,14 @@ pub fn build_app(config: RouterConfig) -> Result<App, Box<dyn std::error::Error>
     ));
     let metrics = RouterMetrics::new();
 
-    let health_task = health::spawn_health_checker(
-        pool.clone(),
-        circuit_breakers.clone(),
-        client.clone(),
-        config.health_check.clone(),
-    );
+    let health_task =
+        health::spawn_health_checker(pool.clone(), client.clone(), config.health_check.clone());
 
     let state = AppState {
         pool,
         strategy: Arc::from(strategy),
         strategy_name: config.routing.strategy.clone(),
         client,
-        circuit_breakers,
         backpressure,
         metrics,
         ewma_alpha: config.routing.latency_aware.alpha,

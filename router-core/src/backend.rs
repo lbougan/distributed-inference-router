@@ -1,14 +1,16 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::circuit_breaker::CircuitBreaker;
+
 pub type BackendId = usize;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct Backend {
     pub id: BackendId,
     pub url: String,
     pub weight: u32,
+    pub breaker: CircuitBreaker,
     pub healthy: AtomicBool,
     pub active_connections: AtomicUsize,
     pub total_requests: AtomicU64,
@@ -26,11 +28,12 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(id: BackendId, url: String, weight: u32) -> Self {
+    pub fn new(id: BackendId, url: String, weight: u32, breaker: CircuitBreaker) -> Self {
         Self {
             id,
             url,
             weight,
+            breaker,
             healthy: AtomicBool::new(true),
             active_connections: AtomicUsize::new(0),
             total_requests: AtomicU64::new(0),
@@ -41,6 +44,11 @@ impl Backend {
             consecutive_health_failures: AtomicU64::new(0),
             consecutive_health_successes: AtomicU64::new(0),
         }
+    }
+
+    /// Healthy per active checks and the breaker lets traffic through.
+    pub fn is_routable(&self) -> bool {
+        self.is_healthy() && self.breaker.is_routable()
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -92,8 +100,12 @@ impl BackendPool {
         Self { backends }
     }
 
-    pub fn healthy_backends(&self) -> Vec<&Arc<Backend>> {
-        self.backends.iter().filter(|b| b.is_healthy()).collect()
+    pub fn routable(&self) -> Vec<Arc<Backend>> {
+        self.backends
+            .iter()
+            .filter(|b| b.is_routable())
+            .cloned()
+            .collect()
     }
 
     pub fn get(&self, id: BackendId) -> Option<&Arc<Backend>> {
@@ -106,5 +118,40 @@ impl BackendPool {
 
     pub fn is_empty(&self) -> bool {
         self.backends.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend(id: usize) -> Arc<Backend> {
+        Arc::new(Backend::new(
+            id,
+            format!("http://b{id}"),
+            1,
+            CircuitBreaker::default(),
+        ))
+    }
+
+    #[test]
+    fn routable_excludes_unhealthy_and_open_circuit() {
+        let pool = BackendPool::new(vec![backend(0), backend(1), backend(2)]);
+        pool.backends[1].mark_unhealthy();
+        let open = CircuitBreaker::new(0.5, 1, 60, 30);
+        open.record_failure();
+        let b2 = Arc::new(Backend::new(2, "http://b2".into(), 1, open));
+        let pool = BackendPool::new(vec![pool.backends[0].clone(), pool.backends[1].clone(), b2]);
+        let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![0]);
+    }
+
+    #[test]
+    fn ewma_first_sample_is_taken_as_is() {
+        let b = backend(0);
+        b.update_ewma_latency(1000, 0.3);
+        assert_eq!(b.ewma_latency_us.load(Ordering::Relaxed), 1000);
+        b.update_ewma_latency(2000, 0.5);
+        assert_eq!(b.ewma_latency_us.load(Ordering::Relaxed), 1500);
     }
 }

@@ -196,3 +196,51 @@ async fn upstream_x_router_backend_header_is_replaced() {
     assert_eq!(values.len(), 1);
     assert_eq!(values[0], m.url.as_str());
 }
+
+#[tokio::test]
+async fn open_circuit_backend_is_skipped_not_503() {
+    let bad = spawn_mock("bad").await;
+    let ok1 = spawn_mock("ok1").await;
+    let ok2 = spawn_mock("ok2").await;
+    bad.set_fail(true);
+    let r = start_router(
+        &[&bad, &ok1, &ok2],
+        RouterOpts {
+            cb_min_requests: 4,
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = client();
+    let mut statuses = Vec::new();
+    for _ in 0..60 {
+        statuses.push(post_chat(&c, &r.url, "x").await.status().as_u16());
+    }
+    // Round-robin sends every third request to `bad` until its breaker opens after 4 failures.
+    let failures_before_open = statuses.iter().filter(|s| **s == 500).count();
+    assert!(
+        failures_before_open <= 4,
+        "got {failures_before_open} backend 500s: {statuses:?}"
+    );
+    assert!(
+        statuses[30..].iter().all(|s| *s == 200),
+        "after the breaker opens every request must succeed: {:?}",
+        &statuses[30..]
+    );
+    assert!(
+        !statuses.contains(&503),
+        "an open circuit must not surface as 503"
+    );
+    let text = c
+        .get(format!("{}/metrics", r.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(
+        metric_value(&text, "router_circuit_breaker_state", &bad.url),
+        Some(2.0)
+    );
+}

@@ -19,6 +19,7 @@ impl CircuitState {
     }
 }
 
+#[derive(Debug)]
 pub struct CircuitBreaker {
     state: Mutex<CircuitState>,
     failure_count: AtomicU64,
@@ -31,6 +32,12 @@ pub struct CircuitBreaker {
     min_requests: u64,
     window_duration: Duration,
     open_duration: Duration,
+}
+
+impl Default for CircuitBreaker {
+    fn default() -> Self {
+        Self::from_config(&crate::config::CircuitBreakerConfig::default())
+    }
 }
 
 impl CircuitBreaker {
@@ -52,6 +59,26 @@ impl CircuitBreaker {
             window_duration: Duration::from_secs(window_secs),
             open_duration: Duration::from_secs(open_duration_secs),
         }
+    }
+
+    pub fn from_config(cfg: &crate::config::CircuitBreakerConfig) -> Self {
+        Self::new(
+            cfg.failure_rate_threshold,
+            cfg.min_requests,
+            cfg.window_secs,
+            cfg.open_duration_secs,
+        )
+    }
+
+    /// Non-consuming check used when building the routable set.
+    pub fn is_routable(&self) -> bool {
+        self.allows_request()
+    }
+
+    /// Called once a backend has been selected. Task 6 makes this consume the
+    /// single half-open probe; for now it mirrors `allows_request`.
+    pub fn try_begin(&self) -> bool {
+        self.allows_request()
     }
 
     pub fn state(&self) -> CircuitState {

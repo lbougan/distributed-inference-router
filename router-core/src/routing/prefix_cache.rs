@@ -1,10 +1,9 @@
-use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::sync::Arc;
 
 use super::{IncomingRequest, RoutingStrategy};
-use crate::backend::{BackendId, BackendPool};
+use crate::backend::{Backend, BackendId};
 
 /// Routes requests to a consistent backend based on the prompt prefix hash,
 /// maximizing vLLM's KV cache hit rate.
@@ -52,93 +51,54 @@ impl PrefixCacheAware {
     }
 }
 
-#[async_trait]
 impl RoutingStrategy for PrefixCacheAware {
-    async fn select_backend(
-        &self,
-        request: &IncomingRequest,
-        pool: &BackendPool,
-    ) -> Option<BackendId> {
-        let healthy = pool.healthy_backends();
-        if healthy.is_empty() {
+    fn select(&self, request: &IncomingRequest, routable: &[Arc<Backend>]) -> Option<BackendId> {
+        if routable.is_empty() {
             return None;
         }
-
         let prefix = self.extract_prefix(&request.body);
         if prefix.is_empty() {
-            // Fall back to least connections
-            return healthy
+            return routable
                 .iter()
                 .min_by_key(|b| b.active_connections.load(Ordering::Relaxed))
                 .map(|b| b.id);
         }
-
-        let target_idx = Self::consistent_hash(&prefix, healthy.len());
-        Some(healthy[target_idx].id)
+        let idx = Self::consistent_hash(&prefix, routable.len());
+        Some(routable[idx].id)
     }
-
-    fn on_request_complete(&self, _backend: BackendId, _latency: Duration, _success: bool) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Backend;
-    use std::sync::Arc;
+    use crate::routing::test_support::backends;
 
-    fn make_pool(n: usize) -> BackendPool {
-        let backends: Vec<Arc<Backend>> = (0..n)
-            .map(|i| Arc::new(Backend::new(i, format!("http://backend-{i}:8000"), 1)))
-            .collect();
-        BackendPool::new(backends)
-    }
-
-    #[tokio::test]
-    async fn same_prefix_routes_to_same_backend() {
+    #[test]
+    fn same_prefix_routes_to_same_backend() {
         let strategy = PrefixCacheAware::new(256);
-        let pool = make_pool(3);
-
-        let body = serde_json::json!({
-            "messages": [{"role": "user", "content": "Hello, how are you doing today?"}]
-        });
+        let b = backends(3);
+        let body = serde_json::json!({"messages": [{"role": "user", "content": "Hello, how are you doing today?"}]});
         let req = IncomingRequest {
             path: "/v1/chat/completions".into(),
-            body: Some(body.clone()),
+            body: Some(body),
         };
-
-        let first = strategy.select_backend(&req, &pool).await.unwrap();
+        let first = strategy.select(&req, &b).unwrap();
         for _ in 0..10 {
-            let req = IncomingRequest {
-                path: "/v1/chat/completions".into(),
-                body: Some(body.clone()),
-            };
-            let id = strategy.select_backend(&req, &pool).await.unwrap();
-            assert_eq!(id, first, "same prefix should always route to same backend");
+            assert_eq!(strategy.select(&req, &b).unwrap(), first);
         }
     }
 
-    #[tokio::test]
-    async fn different_prefixes_can_route_differently() {
+    #[test]
+    fn different_prefixes_spread_across_backends() {
         let strategy = PrefixCacheAware::new(256);
-        let pool = make_pool(10);
-
-        let mut seen = std::collections::HashSet::new();
-        for i in 0..20 {
-            let body = serde_json::json!({
-                "prompt": format!("unique prompt number {} with distinct content", i)
-            });
-            let req = IncomingRequest {
-                path: "/v1/completions".into(),
-                body: Some(body),
-            };
-            if let Some(id) = strategy.select_backend(&req, &pool).await {
-                seen.insert(id);
-            }
-        }
-        assert!(
-            seen.len() > 1,
-            "different prefixes should spread across backends"
-        );
+        let b = backends(10);
+        let seen: std::collections::HashSet<usize> = (0..20)
+            .map(|i| {
+                let body = serde_json::json!({"prompt": format!("unique prompt number {i} with distinct content")});
+                strategy.select(&IncomingRequest { path: "/v1/completions".into(), body: Some(body) }, &b).unwrap()
+            })
+            .collect();
+        assert!(seen.len() > 1);
     }
 
     #[test]

@@ -6,9 +6,8 @@ use axum::Router;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::backend::BackendPool;
+use crate::backend::{Backend, BackendPool};
 use crate::backpressure::BackpressureController;
-use crate::circuit_breaker::CircuitBreaker;
 use crate::metrics::{BackendLabels, RejectLabels, RequestLabels, RouterMetrics};
 use crate::proxy::{forward_request, Forwarded, ForwardedBody, MAX_BODY_BYTES};
 use crate::routing::{IncomingRequest, RoutingStrategy};
@@ -19,7 +18,6 @@ pub struct AppState {
     pub strategy: Arc<dyn RoutingStrategy>,
     pub strategy_name: String,
     pub client: reqwest::Client,
-    pub circuit_breakers: Arc<Vec<CircuitBreaker>>,
     pub backpressure: Arc<BackpressureController>,
     pub metrics: RouterMetrics,
     pub ewma_alpha: f64,
@@ -56,13 +54,11 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
             .get_or_create(&labels)
             .set(if backend.is_healthy() { 1 } else { 0 });
 
-        if let Some(cb) = state.circuit_breakers.get(backend.id) {
-            state
-                .metrics
-                .circuit_breaker_state
-                .get_or_create(&labels)
-                .set(cb.state().as_u64() as i64);
-        }
+        state
+            .metrics
+            .circuit_breaker_state
+            .get_or_create(&labels)
+            .set(backend.breaker.state().as_u64() as i64);
     }
 
     state.metrics.encode()
@@ -91,6 +87,21 @@ fn into_response(forwarded: Forwarded, backend_url: &str) -> Response<Body> {
     builder.body(body).expect("response from valid parts")
 }
 
+/// Ask the strategy for a backend among the routable ones; if its breaker refuses the
+/// request (half-open probe already taken), drop it from the candidates and ask again.
+fn select_backend(state: &AppState, incoming: &IncomingRequest) -> Option<Arc<Backend>> {
+    let mut candidates = state.pool.routable();
+    while !candidates.is_empty() {
+        let id = state.strategy.select(incoming, &candidates)?;
+        let backend = candidates.iter().find(|b| b.id == id)?.clone();
+        if backend.breaker.try_begin() {
+            return Some(backend);
+        }
+        candidates.retain(|b| b.id != id);
+    }
+    None
+}
+
 async fn proxy_handler(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -110,23 +121,10 @@ async fn proxy_handler(
         body: serde_json::from_slice(&body_bytes).ok(),
     };
 
-    let Some(backend_id) = state.strategy.select_backend(&incoming, &state.pool).await else {
-        inc_rejected(&state, "no_healthy_backend");
+    let Some(backend) = select_backend(&state, &incoming) else {
+        inc_rejected(&state, "no_routable_backend");
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
-
-    if let Some(cb) = state.circuit_breakers.get(backend_id) {
-        if !cb.allows_request() {
-            inc_rejected(&state, "circuit_open");
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    }
-
-    let backend = state
-        .pool
-        .get(backend_id)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .clone();
 
     backend.record_request_start();
     let start = Instant::now();
@@ -148,15 +146,10 @@ async fn proxy_handler(
 
     backend.record_request_end(success);
     backend.update_ewma_latency(elapsed.as_micros() as u64, state.ewma_alpha);
-    state
-        .strategy
-        .on_request_complete(backend_id, elapsed, success);
-    if let Some(cb) = state.circuit_breakers.get(backend_id) {
-        if success {
-            cb.record_success();
-        } else {
-            cb.record_failure();
-        }
+    if success {
+        backend.breaker.record_success();
+    } else {
+        backend.breaker.record_failure();
     }
 
     state

@@ -19,7 +19,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }
 prometheus-client = "0.22"
-async-trait = "0.1"
 rand = "0.8"
 sha2 = "0.10"
 tower = { version = "0.5", features = ["limit", "timeout"] }

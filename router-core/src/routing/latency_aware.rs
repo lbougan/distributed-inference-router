@@ -1,16 +1,25 @@
-use async_trait::async_trait;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use rand::Rng;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use super::{IncomingRequest, RoutingStrategy};
-use crate::backend::{BackendId, BackendPool};
+use crate::backend::{Backend, BackendId};
 
-pub struct LatencyAware;
+/// Latencies within this ratio of each other are treated as equal.
+const FLAT_RATIO: f64 = 1.1;
+
+/// Weighted random selection, weight = 1 / EWMA latency. Falls back to round-robin
+/// while latencies are flat so the first backend is not pinned.
+pub struct LatencyAware {
+    fallback_counter: AtomicUsize,
+}
 
 impl LatencyAware {
     pub fn new() -> Self {
-        Self
+        Self {
+            fallback_counter: AtomicUsize::new(0),
+        }
     }
 }
 
@@ -20,104 +29,67 @@ impl Default for LatencyAware {
     }
 }
 
-#[async_trait]
 impl RoutingStrategy for LatencyAware {
-    async fn select_backend(
-        &self,
-        _request: &IncomingRequest,
-        pool: &BackendPool,
-    ) -> Option<BackendId> {
-        let healthy = pool.healthy_backends();
-        if healthy.is_empty() {
+    fn select(&self, _request: &IncomingRequest, routable: &[Arc<Backend>]) -> Option<BackendId> {
+        if routable.is_empty() {
             return None;
         }
-
-        let latencies: Vec<(BackendId, f64)> = healthy
+        let latencies: Vec<f64> = routable
             .iter()
-            .map(|b| {
-                let lat = b.ewma_latency_us.load(Ordering::Relaxed) as f64;
-                let lat = if lat == 0.0 { 1.0 } else { lat };
-                (b.id, lat)
-            })
+            .map(|b| (b.ewma_latency_us.load(Ordering::Relaxed) as f64).max(1.0))
             .collect();
+        let min = latencies.iter().cloned().fold(f64::MAX, f64::min);
+        let max = latencies.iter().cloned().fold(f64::MIN, f64::max);
 
-        let min_lat = latencies.iter().map(|(_, l)| *l).fold(f64::MAX, f64::min);
-        let max_lat = latencies.iter().map(|(_, l)| *l).fold(f64::MIN, f64::max);
-
-        // If all latencies within 10%, fall back to round-robin-like pick (first)
-        if max_lat <= min_lat * 1.1 {
-            return Some(healthy[0].id);
+        if max <= min * FLAT_RATIO {
+            let idx = self.fallback_counter.fetch_add(1, Ordering::Relaxed) % routable.len();
+            return Some(routable[idx].id);
         }
 
-        // Weighted random: inverse latency -> lower latency = higher weight
-        let weights: Vec<(BackendId, f64)> =
-            latencies.iter().map(|(id, lat)| (*id, 1.0 / lat)).collect();
-
-        let total_weight: f64 = weights.iter().map(|(_, w)| w).sum();
-        let mut rng = rand::thread_rng();
-        let mut pick = rng.gen::<f64>() * total_weight;
-
-        for (id, w) in &weights {
+        let weights: Vec<f64> = latencies.iter().map(|l| 1.0 / l).collect();
+        let total: f64 = weights.iter().sum();
+        let mut pick = rand::thread_rng().gen::<f64>() * total;
+        for (b, w) in routable.iter().zip(&weights) {
             pick -= w;
             if pick <= 0.0 {
-                return Some(*id);
+                return Some(b.id);
             }
         }
-
-        Some(weights.last().unwrap().0)
+        routable.last().map(|b| b.id)
     }
-
-    fn on_request_complete(&self, _backend: BackendId, _latency: Duration, _success: bool) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Backend;
-    use std::sync::Arc;
+    use crate::routing::test_support::{backends, req};
 
-    fn make_pool(n: usize) -> BackendPool {
-        let backends: Vec<Arc<Backend>> = (0..n)
-            .map(|i| Arc::new(Backend::new(i, format!("http://backend-{i}:8000"), 1)))
-            .collect();
-        BackendPool::new(backends)
+    #[test]
+    fn shares_follow_inverse_latency() {
+        let strategy = LatencyAware::new();
+        let b = backends(3);
+        b[0].ewma_latency_us.store(100, Ordering::Relaxed);
+        b[1].ewma_latency_us.store(200, Ordering::Relaxed);
+        b[2].ewma_latency_us.store(400, Ordering::Relaxed);
+        let n = 20_000;
+        let mut counts = [0usize; 3];
+        for _ in 0..n {
+            counts[strategy.select(&req(), &b).unwrap()] += 1;
+        }
+        // weights 4:2:1 -> expected shares 0.571, 0.286, 0.143
+        let share = |i: usize| counts[i] as f64 / n as f64;
+        assert!((share(0) - 4.0 / 7.0).abs() < 0.03, "{counts:?}");
+        assert!((share(1) - 2.0 / 7.0).abs() < 0.03, "{counts:?}");
+        assert!((share(2) - 1.0 / 7.0).abs() < 0.03, "{counts:?}");
     }
 
-    #[tokio::test]
-    async fn prefers_lower_latency_backend() {
+    #[test]
+    fn flat_latencies_round_robin_instead_of_pinning_first() {
         let strategy = LatencyAware::new();
-        let pool = make_pool(3);
-
-        // Backend 0: high latency, Backend 1: low latency, Backend 2: medium
-        pool.backends[0]
-            .ewma_latency_us
-            .store(10000, Ordering::Relaxed);
-        pool.backends[1]
-            .ewma_latency_us
-            .store(100, Ordering::Relaxed);
-        pool.backends[2]
-            .ewma_latency_us
-            .store(5000, Ordering::Relaxed);
-
-        let req = IncomingRequest {
-            path: "/v1/completions".into(),
-            body: None,
-        };
-
-        let mut counts = [0u32; 3];
-        for _ in 0..1000 {
-            let id = strategy.select_backend(&req, &pool).await.unwrap();
-            counts[id] += 1;
-        }
-
-        // Backend 1 (lowest latency) should be picked most often
-        assert!(
-            counts[1] > counts[0],
-            "low-latency backend should be preferred"
-        );
-        assert!(
-            counts[1] > counts[2],
-            "low-latency backend should be preferred"
-        );
+        let b = backends(3);
+        let ids: Vec<usize> = (0..6)
+            .map(|_| strategy.select(&req(), &b).unwrap())
+            .collect();
+        assert_eq!(ids, vec![0, 1, 2, 0, 1, 2]);
     }
 }

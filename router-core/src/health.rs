@@ -3,13 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::BackendPool;
-use crate::circuit_breaker::CircuitBreaker;
 use crate::config::HealthCheckConfig;
 
 /// Spawns a background task that periodically health-checks all backends.
 pub fn spawn_health_checker(
     pool: Arc<BackendPool>,
-    _circuit_breakers: Arc<Vec<CircuitBreaker>>,
     client: reqwest::Client,
     config: HealthCheckConfig,
 ) -> tokio::task::JoinHandle<()> {
