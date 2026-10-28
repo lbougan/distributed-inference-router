@@ -124,7 +124,7 @@ uv run pytest -q                       # unit tests for the mock and the analyze
 uv run pytest -m docker -q             # needs the compose stack up
 ```
 
-CI runs fmt, clippy, the Rust tests, ruff, the Python tests, and a compose smoke test on `main`.
+CI runs fmt, clippy, the Rust tests, ruff, the Python tests, and a compose smoke test on `master`.
 
 ## Running against real vLLM
 
