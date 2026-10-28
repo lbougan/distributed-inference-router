@@ -52,7 +52,11 @@ pub async fn forward_request(
         .unwrap_or(false);
 
     let mut response_builder = Response::builder().status(status);
-    for (key, value) in resp.headers().iter() {
+    for (key, value) in resp
+        .headers()
+        .iter()
+        .filter(|(k, _)| *k != "x-router-backend")
+    {
         response_builder = response_builder.header(key.clone(), value.clone());
     }
     response_builder = response_builder.header("x-router-backend", backend.url.as_str());

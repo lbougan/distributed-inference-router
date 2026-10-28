@@ -21,6 +21,7 @@ pub const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct App {
     pub router: Router,
     pub state: AppState,
+    /// Dropping this handle detaches the task (it keeps running); `main.rs` relies on that.
     pub health_task: JoinHandle<()>,
 }
 

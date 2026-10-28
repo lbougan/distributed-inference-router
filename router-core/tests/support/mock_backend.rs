@@ -62,9 +62,14 @@ impl MockHandle {
     pub fn set_queue_depth(&self, v: u64) {
         self.state.queue_depth.store(v, Ordering::SeqCst);
     }
+    pub fn set_kv_usage_bp(&self, v: u64) {
+        self.state.kv_usage_bp.store(v, Ordering::SeqCst);
+    }
     pub fn requests(&self) -> usize {
         self.state.requests.load(Ordering::SeqCst)
     }
+    /// Requests the mock is still generating; the count drops just before the final bytes
+    /// are written to the socket.
     pub fn in_flight(&self) -> usize {
         self.state.in_flight.load(Ordering::SeqCst)
     }

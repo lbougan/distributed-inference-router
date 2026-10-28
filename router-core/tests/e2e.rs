@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures_util::future::join_all;
 use support::mock_backend::spawn_mock;
 use support::router::{start_router, RouterOpts};
-use support::{chat_body, metric_value};
+use support::{chat_body, metric_value, wait_until};
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()
@@ -18,6 +18,18 @@ async fn post_chat(client: &reqwest::Client, router_url: &str, prompt: &str) -> 
         .send()
         .await
         .expect("request sent")
+}
+
+async fn backend_health(c: &reqwest::Client, router_url: &str, backend_url: &str) -> Option<f64> {
+    let text = c
+        .get(format!("{router_url}/metrics"))
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    metric_value(&text, "router_backend_health", backend_url)
 }
 
 #[tokio::test]
@@ -72,9 +84,12 @@ async fn unhealthy_backend_is_skipped_after_health_check() {
     let m2 = spawn_mock("m2").await;
     let r = start_router(&[&m1, &m2], RouterOpts::default()).await;
     m1.set_healthy(false);
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-    let before = m1.requests();
     let c = client();
+    wait_until(Duration::from_secs(5), "m1 marked unhealthy", || async {
+        backend_health(&c, &r.url, &m1.url).await == Some(0.0)
+    })
+    .await;
+    let before = m1.requests();
     for _ in 0..8 {
         assert_eq!(post_chat(&c, &r.url, "x").await.status(), 200);
     }
@@ -91,10 +106,15 @@ async fn all_backends_down_returns_503() {
     let m1 = spawn_mock("m1").await;
     let r = start_router(&[&m1], RouterOpts::default()).await;
     m1.set_healthy(false);
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-    assert_eq!(post_chat(&client(), &r.url, "x").await.status(), 503);
+    let c = client();
+    wait_until(Duration::from_secs(5), "m1 marked unhealthy", || async {
+        backend_health(&c, &r.url, &m1.url).await == Some(0.0)
+    })
+    .await;
+    assert_eq!(post_chat(&c, &r.url, "x").await.status(), 503);
 }
 
+// The first two arrivals always get a slot (max_in_flight = 2), so at least two 200s are guaranteed.
 #[tokio::test]
 async fn backpressure_returns_429_and_never_500() {
     let m = spawn_mock("m1").await;

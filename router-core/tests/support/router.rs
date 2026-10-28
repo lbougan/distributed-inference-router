@@ -21,6 +21,8 @@ pub struct RouterOpts {
     pub weights: Vec<u32>,
     pub max_in_flight: usize,
     pub health_interval_secs: u64,
+    pub unhealthy_threshold: u32,
+    pub healthy_threshold: u32,
     pub cb_min_requests: u64,
     pub cb_open_secs: u64,
     pub max_backend_queue_depth: u64,
@@ -34,6 +36,8 @@ impl Default for RouterOpts {
             weights: Vec::new(),
             max_in_flight: 1000,
             health_interval_secs: 1,
+            unhealthy_threshold: 1,
+            healthy_threshold: 1,
             cb_min_requests: 4,
             cb_open_secs: 30,
             max_backend_queue_depth: 50,
@@ -52,12 +56,14 @@ pub fn test_config_yaml(backend_urls: &[&str], opts: &RouterOpts) -> String {
         "listen:\n  host: \"127.0.0.1\"\n  port: 0\n\
          routing:\n  strategy: \"{strategy}\"\n\
          backends:\n{backends}\
-         health_check:\n  interval_secs: {hi}\n  unhealthy_threshold: 1\n  healthy_threshold: 1\n\
+         health_check:\n  interval_secs: {hi}\n  unhealthy_threshold: {ut}\n  healthy_threshold: {ht}\n\
          circuit_breaker:\n  failure_rate_threshold: 0.5\n  min_requests: {minr}\n  window_secs: 60\n  open_duration_secs: {open}\n\
          backpressure:\n  max_in_flight: {mif}\n  max_backend_queue_depth: {mqd}\n\
          metrics:\n  enabled: {men}\n  path: \"/metrics\"\n",
         strategy = opts.strategy,
         hi = opts.health_interval_secs,
+        ut = opts.unhealthy_threshold,
+        ht = opts.healthy_threshold,
         minr = opts.cb_min_requests,
         open = opts.cb_open_secs,
         mif = opts.max_in_flight,
