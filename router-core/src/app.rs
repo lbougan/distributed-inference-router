@@ -46,6 +46,7 @@ pub fn build_app(config: RouterConfig) -> Result<App, Box<dyn std::error::Error>
     let strategy = routing::create_strategy(
         &config.routing.strategy,
         config.routing.prefix_cache.prefix_token_count,
+        pool.len(),
     );
 
     let client = reqwest::Client::builder()

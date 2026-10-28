@@ -434,3 +434,60 @@ async fn half_open_probe_is_single_and_other_backends_keep_serving() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn prefix_cache_keeps_locality_across_a_backend_loss() {
+    let m1 = spawn_mock("m1").await;
+    let m2 = spawn_mock("m2").await;
+    let m3 = spawn_mock("m3").await;
+    let r = start_router(
+        &[&m1, &m2, &m3],
+        RouterOpts {
+            strategy: "prefix_cache",
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = client();
+    // The strategy hashes the first prefix_token_count * 4 = 1024 chars, so pad each
+    // system prompt past that limit; the per-question suffix then falls outside the key.
+    let prefixes: Vec<String> = (0..10)
+        .map(|i| format!("System prompt variant {i}. {} User says:", "x".repeat(1100)))
+        .collect();
+
+    let mut assignment = Vec::new();
+    for p in &prefixes {
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..5 {
+            let resp = post_chat(&c, &r.url, &format!("{p} question {k}")).await;
+            seen.insert(
+                resp.headers()["x-router-backend"]
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_eq!(seen.len(), 1, "prefix {p:?} hit several backends: {seen:?}");
+        assignment.push(seen.into_iter().next().unwrap());
+    }
+
+    m1.set_healthy(false);
+    wait_until(Duration::from_secs(5), "m1 marked unhealthy", || async {
+        backend_health(&c, &r.url, &m1.url).await == Some(0.0)
+    })
+    .await;
+    let mut moved = 0;
+    for (p, before) in prefixes.iter().zip(&assignment) {
+        let resp = post_chat(&c, &r.url, &format!("{p} question 99")).await;
+        let after = resp.headers()["x-router-backend"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(after, m1.url);
+        if &after != before {
+            assert_eq!(before, &m1.url, "only prefixes that were on m1 may move");
+            moved += 1;
+        }
+    }
+    assert!(moved <= 6, "moved {moved} of 10 prefixes");
+}
