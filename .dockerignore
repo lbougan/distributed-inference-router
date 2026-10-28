@@ -4,3 +4,10 @@ router-core/target/
 docs/
 *.md
 !README.md
+router-core/rust-toolchain.toml
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+**/__pycache__/
+benchmarks/plots/
+benchmarks/results*.json
