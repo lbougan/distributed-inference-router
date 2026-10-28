@@ -139,7 +139,7 @@ mod tests {
         let pool = BackendPool::new(vec![backend(0), backend(1), backend(2)]);
         pool.backends[1].mark_unhealthy();
         let open = CircuitBreaker::new(0.5, 1, 60, 30);
-        open.record_failure();
+        open.record_failure(crate::circuit_breaker::Admission::Normal);
         let b2 = Arc::new(Backend::new(2, "http://b2".into(), 1, open));
         let pool = BackendPool::new(vec![pool.backends[0].clone(), pool.backends[1].clone(), b2]);
         let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();

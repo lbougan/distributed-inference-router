@@ -235,6 +235,12 @@ impl RouterConfig {
                 "routing.latency_aware.alpha must be in (0, 1], got {alpha}"
             ));
         }
+        let rate = self.circuit_breaker.failure_rate_threshold;
+        if !rate.is_finite() || rate <= 0.0 || rate > 1.0 {
+            return Err(format!(
+                "circuit_breaker.failure_rate_threshold must be in (0, 1], got {rate}"
+            ));
+        }
         if self.backends.is_empty() {
             return Err("backends must not be empty".to_string());
         }
@@ -313,5 +319,19 @@ mod tests {
         let err = RouterConfig::from_yaml(&yaml_with("0.3", "\n  - url: \"http://a:8000\\nx\""))
             .unwrap_err();
         assert!(err.to_string().contains("url"), "{err}");
+    }
+
+    #[test]
+    fn rejects_out_of_range_failure_rate_threshold() {
+        for rate in ["0", "1.5"] {
+            let yaml = format!(
+                "listen: {{}}\nrouting: {{}}\ncircuit_breaker:\n  failure_rate_threshold: {rate}\nbackends:{ONE_BACKEND}\n"
+            );
+            let err = RouterConfig::from_yaml(&yaml).unwrap_err();
+            assert!(
+                err.to_string().contains("failure_rate_threshold"),
+                "{rate}: {err}"
+            );
+        }
     }
 }

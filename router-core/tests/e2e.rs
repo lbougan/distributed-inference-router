@@ -415,9 +415,10 @@ async fn half_open_probe_is_single_and_other_backends_keep_serving() {
         .map(|resp| resp.status().as_u16())
         .collect();
     assert!(statuses.iter().all(|s| *s == 200), "{statuses:?}");
-    assert!(
-        flaky.requests() - before <= 1,
-        "at most one probe while half-open"
+    assert_eq!(
+        flaky.requests() - before,
+        1,
+        "exactly one probe while half-open"
     );
     // The probe succeeded, so the circuit closes and flaky re-enters rotation.
     wait_until(Duration::from_secs(3), "flaky circuit closed", || async {

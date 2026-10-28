@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::accounting::{AccountedStream, Outcome, RequestAccounting};
 use crate::backend::{Backend, BackendPool};
 use crate::backpressure::BackpressureController;
+use crate::circuit_breaker::Admission;
 use crate::metrics::{BackendLabels, RejectLabels, RouterMetrics};
 use crate::proxy::{forward_request, Forwarded, ForwardedBody, MAX_BODY_BYTES};
 use crate::routing::{IncomingRequest, RoutingStrategy};
@@ -116,13 +117,22 @@ fn body_error_status(err: axum::Error) -> StatusCode {
 
 /// Ask the strategy for a backend among the routable ones; if its breaker refuses the
 /// request (half-open probe already taken), drop it from the candidates and ask again.
-fn select_backend(state: &AppState, incoming: &IncomingRequest) -> Option<Arc<Backend>> {
+fn select_backend(
+    state: &AppState,
+    incoming: &IncomingRequest,
+) -> Option<(Arc<Backend>, Admission)> {
     let mut candidates = state.pool.routable();
     while !candidates.is_empty() {
         let id = state.strategy.select(incoming, &candidates)?;
-        let backend = candidates.iter().find(|b| b.id == id)?.clone();
-        if backend.breaker.try_begin() {
-            return Some(backend);
+        let Some(backend) = candidates.iter().find(|b| b.id == id).cloned() else {
+            tracing::error!(
+                backend_id = id,
+                "strategy returned an id outside the candidates"
+            );
+            return None;
+        };
+        if let Some(adm) = backend.breaker.try_begin() {
+            return Some((backend, adm));
         }
         candidates.retain(|b| b.id != id);
     }
@@ -148,7 +158,7 @@ async fn proxy_handler(
         body: serde_json::from_slice(&body_bytes).ok(),
     };
 
-    let Some(backend) = select_backend(&state, &incoming) else {
+    let Some((backend, adm)) = select_backend(&state, &incoming) else {
         inc_rejected(&state, "no_routable_backend");
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -158,6 +168,7 @@ async fn proxy_handler(
         state.metrics.clone(),
         state.strategy_name.clone(),
         state.ewma_alpha,
+        adm,
         permit,
     );
     match forward_request(

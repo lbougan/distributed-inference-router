@@ -16,6 +16,7 @@ use futures_util::Stream;
 
 use crate::backend::Backend;
 use crate::backpressure::Permit;
+use crate::circuit_breaker::Admission;
 use crate::metrics::{BackendLabels, RequestLabels, RouterMetrics};
 use crate::proxy::ByteStream;
 
@@ -60,6 +61,7 @@ pub struct RequestAccounting {
     /// When the backend's response headers arrived (time to first byte).
     headers_at: Option<Instant>,
     outcome: Outcome,
+    admission: Admission,
     _permit: Permit,
 }
 
@@ -70,6 +72,7 @@ impl RequestAccounting {
         metrics: RouterMetrics,
         strategy_name: String,
         ewma_alpha: f64,
+        admission: Admission,
         permit: Permit,
     ) -> Self {
         backend.record_request_start();
@@ -81,6 +84,7 @@ impl RequestAccounting {
             started: Instant::now(),
             headers_at: None,
             outcome: Outcome::ClientDisconnect,
+            admission,
             _permit: permit,
         }
     }
@@ -122,13 +126,15 @@ impl Drop for RequestAccounting {
                         .update_ewma_latency(ttfb.as_micros() as u64, self.ewma_alpha);
                 }
                 if outcome.is_backend_failure() {
-                    self.backend.breaker.record_failure();
+                    self.backend.breaker.record_failure(self.admission);
                 } else {
-                    self.backend.breaker.record_success();
+                    self.backend.breaker.record_success(self.admission);
                 }
             }
-            Outcome::TransportError | Outcome::StreamError => self.backend.breaker.record_failure(),
-            Outcome::ClientDisconnect => self.backend.breaker.abandon(),
+            Outcome::TransportError | Outcome::StreamError => {
+                self.backend.breaker.record_failure(self.admission)
+            }
+            Outcome::ClientDisconnect => self.backend.breaker.abandon(self.admission),
         }
 
         // The histogram covers the full request duration, whatever the outcome.
@@ -233,6 +239,7 @@ mod tests {
             f.metrics.clone(),
             "test".into(),
             0.3,
+            Admission::Normal,
             f.controller.try_acquire().unwrap(),
         )
     }
@@ -361,5 +368,35 @@ mod tests {
         acc.finish(Outcome::Completed(StatusCode::OK));
         let ewma = f.backend.ewma_latency_us.load(Ordering::Relaxed);
         assert!((9_000..=11_000).contains(&ewma), "ewma was {ewma}");
+    }
+
+    #[test]
+    fn probe_disconnect_hands_the_probe_back() {
+        let f = Fixture {
+            backend: Arc::new(Backend::new(
+                0,
+                "http://b0".into(),
+                1,
+                CircuitBreaker::new(0.5, 1, 60, 1),
+            )),
+            controller: Arc::new(BackpressureController::new(4)),
+            metrics: RouterMetrics::new(),
+        };
+        let breaker = &f.backend.breaker;
+        breaker.record_failure(Admission::Normal);
+        breaker.advance(Duration::from_secs(2));
+        let adm = breaker.try_begin().unwrap();
+        assert_eq!(adm, Admission::Probe);
+        let acc = RequestAccounting::start(
+            f.backend.clone(),
+            f.metrics.clone(),
+            "test".into(),
+            0.3,
+            adm,
+            f.controller.try_acquire().unwrap(),
+        );
+        drop(acc);
+        assert_eq!(breaker.try_begin(), Some(Admission::Probe));
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
     }
 }

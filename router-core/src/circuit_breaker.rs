@@ -3,9 +3,10 @@
 //! Failure rate is computed over a sliding window of 1-second buckets, so a burst of
 //! failures right after a window boundary is judged against the previous seconds too.
 //! Half-open admits exactly one probe request; its verdict decides Closed or Open.
+//! Every admitted request carries an [`Admission`] token, so verdicts from requests that
+//! started before the trip (`Normal`) can never close the circuit or release the probe.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,13 @@ impl CircuitState {
     }
 }
 
+/// How a request was admitted. Only a `Probe` verdict may move a half-open breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Normal,
+    Probe,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct Bucket {
     successes: u64,
@@ -38,6 +46,8 @@ struct Inner {
     buckets: Vec<Bucket>,
     head: usize,
     head_start: Instant,
+    /// True while the single half-open probe is out.
+    probe_in_flight: bool,
 }
 
 impl Inner {
@@ -82,11 +92,11 @@ impl Inner {
 #[derive(Debug)]
 pub struct CircuitBreaker {
     inner: Mutex<Inner>,
-    probe_in_flight: AtomicBool,
     failure_rate_threshold: f64,
     min_requests: u64,
     open_duration: Duration,
     /// Added to `Instant::now()`; only tests move it.
+    #[cfg(test)]
     clock_offset: Mutex<Duration>,
 }
 
@@ -111,11 +121,12 @@ impl CircuitBreaker {
                 buckets: vec![Bucket::default(); window_secs.max(1) as usize],
                 head: 0,
                 head_start: now,
+                probe_in_flight: false,
             }),
-            probe_in_flight: AtomicBool::new(false),
             failure_rate_threshold,
             min_requests: min_requests.max(1),
             open_duration: Duration::from_secs(open_duration_secs),
+            #[cfg(test)]
             clock_offset: Mutex::new(Duration::ZERO),
         }
     }
@@ -129,66 +140,95 @@ impl CircuitBreaker {
         )
     }
 
+    #[cfg(test)]
     fn now(&self) -> Instant {
         Instant::now() + *self.clock_offset.lock().unwrap()
     }
 
+    #[cfg(not(test))]
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    /// Accounting calls into the breaker from `Drop`; a poisoned lock must not abort.
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Current state. Side effect: moves Open to HalfOpen once `open_duration` has
+    /// elapsed (the metrics handler calls this).
     pub fn state(&self) -> CircuitState {
         let now = self.now();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         inner.refresh(now, self.open_duration);
         inner.state
     }
 
     /// May this backend be offered to the strategy right now?
     pub fn is_routable(&self) -> bool {
-        match self.state() {
-            CircuitState::Closed => true,
-            CircuitState::HalfOpen => !self.probe_in_flight.load(Ordering::Acquire),
-            CircuitState::Open => false,
-        }
-    }
-
-    /// Claim the right to send one request. In HalfOpen only one caller wins.
-    pub fn try_begin(&self) -> bool {
-        match self.state() {
-            CircuitState::Closed => true,
-            CircuitState::Open => false,
-            CircuitState::HalfOpen => self
-                .probe_in_flight
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok(),
-        }
-    }
-
-    pub fn record_success(&self) {
         let now = self.now();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
+        inner.refresh(now, self.open_duration);
+        match inner.state {
+            CircuitState::Closed => true,
+            CircuitState::HalfOpen => !inner.probe_in_flight,
+            CircuitState::Open => false,
+        }
+    }
+
+    /// Claim the right to send one request. In HalfOpen only one caller wins the probe;
+    /// the state check and the claim happen under one lock.
+    pub fn try_begin(&self) -> Option<Admission> {
+        let now = self.now();
+        let mut inner = self.lock();
+        inner.refresh(now, self.open_duration);
+        match inner.state {
+            CircuitState::Closed => Some(Admission::Normal),
+            CircuitState::Open => None,
+            CircuitState::HalfOpen => {
+                if inner.probe_in_flight {
+                    None
+                } else {
+                    inner.probe_in_flight = true;
+                    Some(Admission::Probe)
+                }
+            }
+        }
+    }
+
+    pub fn record_success(&self, adm: Admission) {
+        let now = self.now();
+        let mut inner = self.lock();
         inner.refresh(now, self.open_duration);
         inner.rotate(now);
-        if inner.state == CircuitState::HalfOpen {
+        if inner.state == CircuitState::HalfOpen && adm == Admission::Probe {
             inner.state = CircuitState::Closed;
             inner.opened_at = None;
             inner.clear(now);
-            self.probe_in_flight.store(false, Ordering::Release);
+            inner.probe_in_flight = false;
         }
+        // A stale `Normal` verdict is only counted; it never changes state.
         let head = inner.head;
         inner.buckets[head].successes += 1;
     }
 
-    pub fn record_failure(&self) {
+    pub fn record_failure(&self, adm: Admission) {
         let now = self.now();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         inner.refresh(now, self.open_duration);
         inner.rotate(now);
-        if inner.state == CircuitState::HalfOpen {
+        if inner.state == CircuitState::HalfOpen && adm == Admission::Probe {
             inner.state = CircuitState::Open;
             inner.opened_at = Some(now);
-            self.probe_in_flight.store(false, Ordering::Release);
+            inner.probe_in_flight = false;
             return;
         }
         let head = inner.head;
         inner.buckets[head].failures += 1;
+        // Late failures while Open/HalfOpen are counted but must not extend the open period.
+        if inner.state != CircuitState::Closed {
+            return;
+        }
         let (failures, total) = inner.totals();
         if total >= self.min_requests
             && failures as f64 / total as f64 >= self.failure_rate_threshold
@@ -198,9 +238,16 @@ impl CircuitBreaker {
         }
     }
 
-    /// The request ended without a verdict (client disconnected): hand back the probe.
-    pub fn abandon(&self) {
-        self.probe_in_flight.store(false, Ordering::Release);
+    /// The request ended without a verdict (client disconnected). A probe is handed
+    /// back; a `Normal` request holds nothing.
+    pub fn abandon(&self, adm: Admission) {
+        if adm != Admission::Probe {
+            return;
+        }
+        let mut inner = self.lock();
+        if inner.state == CircuitState::HalfOpen {
+            inner.probe_in_flight = false;
+        }
     }
 
     #[cfg(test)]
@@ -219,10 +266,10 @@ mod tests {
     }
 
     fn trip(cb: &CircuitBreaker) {
-        cb.record_success();
-        cb.record_failure();
-        cb.record_failure();
-        cb.record_failure();
+        cb.record_success(Admission::Normal);
+        cb.record_failure(Admission::Normal);
+        cb.record_failure(Admission::Normal);
+        cb.record_failure(Admission::Normal);
         assert_eq!(cb.state(), CircuitState::Open);
     }
 
@@ -231,7 +278,7 @@ mod tests {
         let cb = breaker();
         assert_eq!(cb.state(), CircuitState::Closed);
         assert!(cb.is_routable());
-        assert!(cb.try_begin());
+        assert!(cb.try_begin().is_some());
     }
 
     #[test]
@@ -239,14 +286,14 @@ mod tests {
         let cb = breaker();
         trip(&cb);
         assert!(!cb.is_routable());
-        assert!(!cb.try_begin());
+        assert!(cb.try_begin().is_none());
     }
 
     #[test]
     fn stays_closed_below_min_requests() {
         let cb = CircuitBreaker::new(0.5, 10, 60, 30);
         for _ in 0..5 {
-            cb.record_failure();
+            cb.record_failure(Admission::Normal);
         }
         assert_eq!(cb.state(), CircuitState::Closed);
     }
@@ -267,15 +314,16 @@ mod tests {
         let cb = breaker();
         trip(&cb);
         cb.advance(Duration::from_secs(31));
-        assert!(cb.try_begin(), "first caller gets the probe");
-        assert!(!cb.try_begin(), "second caller does not");
+        let adm = cb.try_begin().unwrap();
+        assert_eq!(adm, Admission::Probe);
+        assert!(cb.try_begin().is_none(), "second caller does not");
         assert!(
             !cb.is_routable(),
             "not offered while the probe is in flight"
         );
-        cb.abandon();
+        cb.abandon(adm);
         assert!(cb.is_routable());
-        assert!(cb.try_begin());
+        assert_eq!(cb.try_begin(), Some(Admission::Probe));
     }
 
     #[test]
@@ -283,12 +331,13 @@ mod tests {
         let cb = breaker();
         trip(&cb);
         cb.advance(Duration::from_secs(31));
-        assert!(cb.try_begin());
-        cb.record_success();
+        let adm = cb.try_begin().unwrap();
+        assert_eq!(adm, Admission::Probe);
+        cb.record_success(adm);
         assert_eq!(cb.state(), CircuitState::Closed);
-        assert!(cb.try_begin());
+        assert_eq!(cb.try_begin(), Some(Admission::Normal));
         // Old failures are forgotten: one new failure must not re-open.
-        cb.record_failure();
+        cb.record_failure(Admission::Normal);
         assert_eq!(cb.state(), CircuitState::Closed);
     }
 
@@ -297,8 +346,9 @@ mod tests {
         let cb = breaker();
         trip(&cb);
         cb.advance(Duration::from_secs(31));
-        assert!(cb.try_begin());
-        cb.record_failure();
+        let adm = cb.try_begin().unwrap();
+        assert_eq!(adm, Admission::Probe);
+        cb.record_failure(adm);
         assert_eq!(cb.state(), CircuitState::Open);
         cb.advance(Duration::from_secs(29));
         assert_eq!(cb.state(), CircuitState::Open);
@@ -309,11 +359,11 @@ mod tests {
     #[test]
     fn sliding_window_forgets_old_failures() {
         let cb = breaker();
-        cb.record_failure();
-        cb.record_failure();
-        cb.record_failure();
+        cb.record_failure(Admission::Normal);
+        cb.record_failure(Admission::Normal);
+        cb.record_failure(Admission::Normal);
         cb.advance(Duration::from_secs(61));
-        cb.record_failure();
+        cb.record_failure(Admission::Normal);
         assert_eq!(
             cb.state(),
             CircuitState::Closed,
@@ -324,11 +374,11 @@ mod tests {
     #[test]
     fn sliding_window_keeps_recent_failures() {
         let cb = breaker();
-        cb.record_failure();
-        cb.record_failure();
+        cb.record_failure(Admission::Normal);
+        cb.record_failure(Admission::Normal);
         cb.advance(Duration::from_secs(30));
-        cb.record_success();
-        cb.record_failure();
+        cb.record_success(Admission::Normal);
+        cb.record_failure(Admission::Normal);
         assert_eq!(
             cb.state(),
             CircuitState::Open,
@@ -341,13 +391,70 @@ mod tests {
         let cb = breaker();
         trip(&cb);
         cb.advance(Duration::from_secs(31));
-        assert!(cb.try_begin());
-        cb.abandon();
+        let adm = cb.try_begin().unwrap();
+        assert_eq!(adm, Admission::Probe);
+        cb.abandon(adm);
         assert_eq!(
             cb.state(),
             CircuitState::HalfOpen,
             "no verdict: still half-open"
         );
-        assert!(cb.try_begin(), "the probe is available again");
+        assert_eq!(
+            cb.try_begin(),
+            Some(Admission::Probe),
+            "the probe is available again"
+        );
+    }
+
+    #[test]
+    fn stale_success_during_half_open_does_not_close() {
+        let cb = breaker();
+        trip(&cb);
+        cb.advance(Duration::from_secs(31));
+        cb.record_success(Admission::Normal);
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        assert_eq!(cb.try_begin(), Some(Admission::Probe));
+    }
+
+    #[test]
+    fn stale_disconnect_during_half_open_keeps_the_probe() {
+        let cb = breaker();
+        trip(&cb);
+        cb.advance(Duration::from_secs(31));
+        assert_eq!(cb.try_begin(), Some(Admission::Probe));
+        cb.abandon(Admission::Normal);
+        assert!(!cb.is_routable());
+        assert!(cb.try_begin().is_none());
+        cb.abandon(Admission::Probe);
+        assert_eq!(cb.try_begin(), Some(Admission::Probe));
+    }
+
+    #[test]
+    fn late_failure_while_open_does_not_extend_the_open_period() {
+        let cb = breaker();
+        trip(&cb);
+        cb.advance(Duration::from_secs(20));
+        cb.record_failure(Admission::Normal);
+        cb.advance(Duration::from_secs(11));
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn window_keeps_oldest_bucket_at_n_minus_1_and_drops_it_at_n() {
+        let cb = CircuitBreaker::new(0.5, 4, 10, 30);
+        for _ in 0..3 {
+            cb.record_failure(Admission::Normal);
+        }
+        cb.advance(Duration::from_secs(9));
+        cb.record_failure(Admission::Normal);
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        let cb = CircuitBreaker::new(0.5, 4, 10, 30);
+        for _ in 0..3 {
+            cb.record_failure(Admission::Normal);
+        }
+        cb.advance(Duration::from_secs(10));
+        cb.record_failure(Admission::Normal);
+        assert_eq!(cb.state(), CircuitState::Closed);
     }
 }
