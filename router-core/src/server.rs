@@ -153,7 +153,7 @@ async fn proxy_handler(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
 
-    let accounting = RequestAccounting::start(
+    let mut accounting = RequestAccounting::start(
         backend.clone(),
         state.metrics.clone(),
         state.strategy_name.clone(),
@@ -170,7 +170,10 @@ async fn proxy_handler(
     )
     .await
     {
-        Ok(forwarded) => Ok(into_response(forwarded, &backend.url, accounting)),
+        Ok(forwarded) => {
+            accounting.mark_headers_received();
+            Ok(into_response(forwarded, &backend.url, accounting))
+        }
         Err(status) => {
             accounting.finish(Outcome::TransportError);
             Err(status)

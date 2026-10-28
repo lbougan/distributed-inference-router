@@ -10,7 +10,7 @@ use futures_util::Stream;
 
 use crate::backend::Backend;
 
-/// Request bodies larger than this are rejected with 400.
+/// Request bodies larger than this are rejected with 413.
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// RFC 7230 §6.1 hop-by-hop headers, `host` (regenerated per hop), and `x-router-backend`

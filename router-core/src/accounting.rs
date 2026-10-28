@@ -24,8 +24,10 @@ pub enum Outcome {
     /// The backend answered and the whole body reached the client. 5xx counts as a
     /// backend failure for the breaker; 2xx/3xx/4xx do not (4xx is the client's doing).
     Completed(StatusCode),
-    /// Connection failure, timeout, or the stream broke mid-way. Backend failure.
+    /// Connection failure or timeout before the response headers arrived. Backend failure.
     TransportError,
+    /// The backend's stream broke after the headers were sent. Backend failure.
+    StreamError,
     /// The client went away before the body finished. Neither success nor failure.
     ClientDisconnect,
 }
@@ -34,7 +36,7 @@ impl Outcome {
     fn is_backend_failure(self) -> bool {
         match self {
             Outcome::Completed(s) => s.is_server_error(),
-            Outcome::TransportError => true,
+            Outcome::TransportError | Outcome::StreamError => true,
             Outcome::ClientDisconnect => false,
         }
     }
@@ -43,6 +45,7 @@ impl Outcome {
         match self {
             Outcome::Completed(s) => s.as_u16().to_string(),
             Outcome::TransportError => "502".to_string(),
+            Outcome::StreamError => "stream_error".to_string(),
             Outcome::ClientDisconnect => "client_disconnect".to_string(),
         }
     }
@@ -54,6 +57,8 @@ pub struct RequestAccounting {
     strategy_name: String,
     ewma_alpha: f64,
     started: Instant,
+    /// When the backend's response headers arrived (time to first byte).
+    headers_at: Option<Instant>,
     outcome: Outcome,
     _permit: Permit,
 }
@@ -74,9 +79,15 @@ impl RequestAccounting {
             strategy_name,
             ewma_alpha,
             started: Instant::now(),
+            headers_at: None,
             outcome: Outcome::ClientDisconnect,
             _permit: permit,
         }
+    }
+
+    /// Records the arrival of the backend's response headers (first byte), once.
+    pub fn mark_headers_received(&mut self) {
+        self.headers_at.get_or_insert_with(Instant::now);
     }
 
     pub fn finish(mut self, outcome: Outcome) {
@@ -88,33 +99,45 @@ impl Drop for RequestAccounting {
     fn drop(&mut self) {
         let elapsed = self.started.elapsed();
         let outcome = self.outcome;
+        if outcome == Outcome::ClientDisconnect {
+            tracing::debug!(
+                backend = %self.backend.url,
+                elapsed_ms = elapsed.as_millis() as u64,
+                headers_received = self.headers_at.is_some(),
+                "request ended without a verdict; recorded as client_disconnect"
+            );
+        }
 
         self.backend
             .record_request_end(!outcome.is_backend_failure());
 
         match outcome {
             Outcome::Completed(status) => {
-                // Only successful completions feed the latency estimate: a backend that
-                // fails fast must not look fast.
+                // Only successful completions feed the latency estimate (a backend that
+                // fails fast must not look fast), and the estimate is time to first byte:
+                // full generation time scales with output length, not backend speed.
                 if status.is_success() {
+                    let ttfb = self.headers_at.unwrap_or_else(Instant::now) - self.started;
                     self.backend
-                        .update_ewma_latency(elapsed.as_micros() as u64, self.ewma_alpha);
+                        .update_ewma_latency(ttfb.as_micros() as u64, self.ewma_alpha);
                 }
                 if outcome.is_backend_failure() {
                     self.backend.breaker.record_failure();
                 } else {
                     self.backend.breaker.record_success();
                 }
-                self.metrics
-                    .request_duration
-                    .get_or_create(&BackendLabels {
-                        backend: self.backend.url.clone(),
-                    })
-                    .observe(elapsed.as_secs_f64());
             }
-            Outcome::TransportError => self.backend.breaker.record_failure(),
+            Outcome::TransportError | Outcome::StreamError => self.backend.breaker.record_failure(),
             Outcome::ClientDisconnect => self.backend.breaker.abandon(),
         }
+
+        // The histogram covers the full request duration, whatever the outcome.
+        self.metrics
+            .request_duration
+            .get_or_create(&BackendLabels {
+                backend: self.backend.url.clone(),
+            })
+            .observe(elapsed.as_secs_f64());
 
         self.metrics
             .requests_total
@@ -149,11 +172,19 @@ impl Stream for AccountedStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
+        if this.accounting.is_none() {
+            return Poll::Ready(None);
+        }
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(chunk))),
             Poll::Ready(Some(Err(e))) => {
                 if let Some(acc) = this.accounting.take() {
-                    acc.finish(Outcome::TransportError);
+                    tracing::warn!(
+                        backend = %acc.backend.url,
+                        error = %e,
+                        "backend stream failed mid-body"
+                    );
+                    acc.finish(Outcome::StreamError);
                 }
                 Poll::Ready(Some(Err(std::io::Error::other(e))))
             }
@@ -175,6 +206,7 @@ mod tests {
     use crate::circuit_breaker::{CircuitBreaker, CircuitState};
     use futures_util::StreamExt;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     struct Fixture {
         backend: Arc<Backend>,
@@ -208,10 +240,10 @@ mod tests {
     #[test]
     fn completed_2xx_records_success_latency_and_releases_permit() {
         let f = fixture();
-        let acc = start(&f);
+        let mut acc = start(&f);
+        acc.started = Instant::now() - Duration::from_millis(5);
         assert_eq!(f.backend.active_connections.load(Ordering::Relaxed), 1);
         assert_eq!(f.controller.in_flight(), 1);
-        std::thread::sleep(std::time::Duration::from_millis(2));
         acc.finish(Outcome::Completed(StatusCode::OK));
         assert_eq!(f.backend.active_connections.load(Ordering::Relaxed), 0);
         assert_eq!(f.controller.in_flight(), 0);
@@ -273,5 +305,61 @@ mod tests {
         assert_eq!(f.backend.active_connections.load(Ordering::Relaxed), 0);
         assert_eq!(f.controller.in_flight(), 0);
         assert!(f.metrics.encode().contains("status=\"200\""));
+    }
+
+    #[tokio::test]
+    async fn stream_error_records_failure_and_releases_permit() {
+        let f = fixture();
+        let acc = start(&f);
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .unwrap_err();
+        let inner: ByteStream = Box::pin(futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(b"a")),
+            Err(err),
+        ]));
+        let mut stream = AccountedStream::new(inner, StatusCode::OK, acc);
+        stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(
+            stream.next().await.is_none(),
+            "stream is fused after an error"
+        );
+        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 1);
+        assert_eq!(f.backend.breaker.state(), CircuitState::Open);
+        assert_eq!(f.controller.in_flight(), 0);
+        assert!(f.metrics.encode().contains("status=\"stream_error\""));
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_midway_is_a_client_disconnect() {
+        let f = fixture();
+        let acc = start(&f);
+        let inner: ByteStream = Box::pin(futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(b"a")),
+            Ok(Bytes::from_static(b"b")),
+        ]));
+        let mut stream = AccountedStream::new(inner, StatusCode::OK, acc);
+        stream.next().await.unwrap().unwrap();
+        drop(stream);
+        assert_eq!(f.backend.active_connections.load(Ordering::Relaxed), 0);
+        assert_eq!(f.backend.total_failures.load(Ordering::Relaxed), 0);
+        assert_eq!(f.backend.breaker.state(), CircuitState::Closed);
+        assert!(f.metrics.encode().contains("client_disconnect"));
+        assert_eq!(f.controller.in_flight(), 0);
+    }
+
+    #[test]
+    fn ewma_uses_time_to_first_byte() {
+        let f = fixture();
+        let mut acc = start(&f);
+        acc.started = Instant::now() - Duration::from_millis(50);
+        acc.mark_headers_received();
+        acc.headers_at = Some(acc.started + Duration::from_millis(10));
+        acc.finish(Outcome::Completed(StatusCode::OK));
+        let ewma = f.backend.ewma_latency_us.load(Ordering::Relaxed);
+        assert!((9_000..=11_000).contains(&ewma), "ewma was {ewma}");
     }
 }

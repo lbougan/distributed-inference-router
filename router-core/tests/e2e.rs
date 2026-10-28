@@ -321,3 +321,51 @@ async fn oversized_body_returns_413() {
     assert_eq!(resp.status().as_u16(), 413);
     assert_eq!(m.requests(), 0);
 }
+
+#[tokio::test]
+async fn client_abort_mid_stream_releases_in_flight_and_is_not_a_backend_failure() {
+    let m = spawn_mock("m1").await;
+    m.set_stream(20, 100);
+    let r = start_router(&[&m], RouterOpts::default()).await;
+    let c = client();
+    let mut resp = c
+        .post(format!("{}/v1/chat/completions", r.url))
+        .json(&chat_body("stream", true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let first = resp.chunk().await.unwrap();
+    assert!(first.is_some());
+    drop(resp); // client goes away after the first chunk
+    wait_until(
+        Duration::from_secs(5),
+        "in-flight back to zero after client abort",
+        || async {
+            let text = c
+                .get(format!("{}/metrics", r.url))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            metric_value(&text, "router_in_flight", "") == Some(0.0)
+                && metric_value(&text, "router_active_connections", &m.url) == Some(0.0)
+        },
+    )
+    .await;
+    let text = c
+        .get(format!("{}/metrics", r.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(text.contains("status=\"client_disconnect\""), "{text}");
+    assert_eq!(
+        metric_value(&text, "router_circuit_breaker_state", &m.url),
+        Some(0.0)
+    );
+}
