@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="300" viewBox="0 0 940 300" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="940" height="300" fill="#fff"/>
+
+  <!-- client -->
+  <rect x="20" y="120" width="90" height="50" rx="8" fill="#eef" stroke="#447"/>
+  <text x="65" y="150" text-anchor="middle">client</text>
+  <line x1="110" y1="145" x2="160" y2="145" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- router box -->
+  <rect x="160" y="40" width="600" height="225" rx="12" fill="#fafafa" stroke="#999" stroke-dasharray="6 4"/>
+  <text x="460" y="62" text-anchor="middle" font-weight="bold">inference-router (one request)</text>
+
+  <!-- 1 admission -->
+  <rect x="180" y="100" width="110" height="60" rx="8" fill="#e8f5e9" stroke="#2e7d32"/>
+  <text x="235" y="125" text-anchor="middle" font-weight="bold">1 admission</text>
+  <text x="235" y="143" text-anchor="middle" fill="#444" font-size="11">permit or 429</text>
+  <line x1="290" y1="130" x2="314" y2="130" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 2 selection -->
+  <rect x="315" y="100" width="140" height="60" rx="8" fill="#e3f2fd" stroke="#1565c0"/>
+  <text x="385" y="125" text-anchor="middle" font-weight="bold">2 selection</text>
+  <text x="385" y="143" text-anchor="middle" fill="#444" font-size="11">routable set → strategy</text>
+  <line x1="455" y1="130" x2="479" y2="130" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 3 forward -->
+  <rect x="480" y="100" width="130" height="60" rx="8" fill="#fff3e0" stroke="#ef6c00"/>
+  <text x="545" y="125" text-anchor="middle" font-weight="bold">3 forward</text>
+  <text x="545" y="143" text-anchor="middle" fill="#444" font-size="11">reqwest · SSE aware</text>
+  <line x1="610" y1="130" x2="634" y2="130" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 4 accounting -->
+  <rect x="635" y="100" width="105" height="60" rx="8" fill="#f3e5f5" stroke="#6a1b9a"/>
+  <text x="687" y="125" text-anchor="middle" font-weight="bold">4 account</text>
+  <text x="687" y="143" text-anchor="middle" fill="#444" font-size="11">on body end</text>
+
+  <!-- per-backend state, written by 4 and by the health checker, read by 2 -->
+  <rect x="300" y="195" width="340" height="46" rx="8" fill="#fff" stroke="#777"/>
+  <text x="470" y="213" text-anchor="middle" fill="#333">per-backend state</text>
+  <text x="470" y="230" text-anchor="middle" fill="#666" font-size="11">health · breaker · EWMA · active · queue depth</text>
+  <path d="M687,160 L687,218 L642,218" fill="none" stroke="#6a1b9a" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M300,218 L282,218 L282,178 L385,178 L385,162" fill="none" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="470" y="256" text-anchor="middle" fill="#666" font-size="11">health checker and /metrics scrape also write here</text>
+
+  <!-- backends -->
+  <line x1="760" y1="130" x2="808" y2="90" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="760" y1="130" x2="808" y2="130" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="760" y1="130" x2="808" y2="170" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="812" y="72" width="100" height="36" rx="6" fill="#eee" stroke="#666"/>
+  <text x="862" y="95" text-anchor="middle">vLLM 1</text>
+  <rect x="812" y="112" width="100" height="36" rx="6" fill="#eee" stroke="#666"/>
+  <text x="862" y="135" text-anchor="middle">vLLM 2</text>
+  <rect x="812" y="152" width="100" height="36" rx="6" fill="#eee" stroke="#666"/>
+  <text x="862" y="175" text-anchor="middle">vLLM 3</text>
+</svg>

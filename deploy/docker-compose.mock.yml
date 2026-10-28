@@ -8,6 +8,8 @@ services:
       - PORT=8000
       - BASE_LATENCY_MS=40
       - LATENCY_STDDEV_MS=10
+      - MAX_CONCURRENT=16
+      - PREFIX_CACHE_SIZE=48
     ports:
       - "8001:8000"
     healthcheck:
@@ -25,6 +27,8 @@ services:
       - PORT=8000
       - BASE_LATENCY_MS=60
       - LATENCY_STDDEV_MS=20
+      - MAX_CONCURRENT=16
+      - PREFIX_CACHE_SIZE=48
     ports:
       - "8002:8000"
     healthcheck:
@@ -42,6 +46,8 @@ services:
       - PORT=8000
       - BASE_LATENCY_MS=80
       - LATENCY_STDDEV_MS=25
+      - MAX_CONCURRENT=16
+      - PREFIX_CACHE_SIZE=48
     ports:
       - "8003:8000"
     healthcheck:
@@ -55,7 +61,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.router
     volumes:
-      - ./router-config.yaml:/etc/inference-router/config.yaml:ro
+      - ${ROUTER_CONFIG:-./router-config.yaml}:/etc/inference-router/config.yaml:ro
     ports:
       - "8080:8080"
     depends_on:

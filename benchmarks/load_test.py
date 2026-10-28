@@ -8,9 +8,9 @@ import argparse
 import asyncio
 import json
 import random
-import sys
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import aiohttp
@@ -37,23 +37,21 @@ class BenchmarkConfig:
     duration_secs: float = 0.0  # 0 = use total_requests instead
     strategy: str = "round_robin"
     stream: bool = False
-    prompt_pool: list[str] = field(default_factory=lambda: [
-        "Explain quantum computing in simple terms.",
-        "Write a Python function to sort a list.",
-        "What is the capital of France?",
-        "Describe the process of photosynthesis.",
-        "How do neural networks learn?",
-        "What are the benefits of microservices?",
-        "Explain the CAP theorem.",
-        "Write a haiku about programming.",
-        "What is Rust's ownership model?",
-        "Describe how HTTP/2 multiplexing works.",
-    ])
-
-
-SAMPLE_MESSAGES = [
-    {"role": "system", "content": "You are a helpful assistant."},
-]
+    prefix_pool: int = 0  # distinct system prompts; 0 = the single default
+    prompt_pool: list[str] = field(
+        default_factory=lambda: [
+            "Explain quantum computing in simple terms.",
+            "Write a Python function to sort a list.",
+            "What is the capital of France?",
+            "Describe the process of photosynthesis.",
+            "How do neural networks learn?",
+            "What are the benefits of microservices?",
+            "Explain the CAP theorem.",
+            "Write a haiku about programming.",
+            "What is Rust's ownership model?",
+            "Describe how HTTP/2 multiplexing works.",
+        ]
+    )
 
 
 async def send_request(
@@ -63,9 +61,12 @@ async def send_request(
     rate_limiter: asyncio.Semaphore | None,
 ) -> RequestResult:
     prompt = random.choice(config.prompt_pool)
+    system = "You are a helpful assistant."
+    if config.prefix_pool > 0:
+        system = f"You are assistant variant {random.randrange(config.prefix_pool)}. Be concise."
     body = {
         "model": "mock-model",
-        "messages": SAMPLE_MESSAGES + [{"role": "user", "content": prompt}],
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         "max_tokens": 50,
         "stream": config.stream,
     }
@@ -88,7 +89,7 @@ async def send_request(
                     await resp.read()
 
                 end = time.monotonic()
-                backend = resp.headers.get("X-Backend-ID", "unknown")
+                backend = resp.headers.get("x-router-backend", "unknown")
                 return RequestResult(
                     start_time=start,
                     end_time=end,
@@ -111,14 +112,25 @@ async def send_request(
 
 
 async def rate_limit_refiller(rate_limiter: asyncio.Semaphore, rps: float):
-    """Refills the rate limiter at the configured RPS."""
-    interval = 1.0 / rps
+    """Token bucket with fractional credit; bursts are capped at one second of tokens."""
+    credit = 0.0
+    last = time.monotonic()
     while True:
-        await asyncio.sleep(interval)
-        try:
+        await asyncio.sleep(0.05)
+        now = time.monotonic()
+        credit = min(credit + rps * (now - last), rps)
+        last = now
+        tokens = int(credit)
+        for _ in range(tokens):
             rate_limiter.release()
-        except ValueError:
-            pass
+        credit -= tokens
+
+
+def _top_up(tasks: set, target: int, spawn: Callable[[], asyncio.Task]) -> None:
+    """Spawn tasks until the in-flight pool holds `target` of them."""
+    while len(tasks) < target:
+        task = spawn()
+        tasks.add(task)
 
 
 async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
@@ -128,9 +140,7 @@ async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
 
     if config.rps_limit > 0:
         rate_limiter = asyncio.Semaphore(0)
-        refiller_task = asyncio.create_task(
-            rate_limit_refiller(rate_limiter, config.rps_limit)
-        )
+        refiller_task = asyncio.create_task(rate_limit_refiller(rate_limiter, config.rps_limit))
 
     connector = aiohttp.TCPConnector(limit=config.concurrency * 2)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -140,21 +150,25 @@ async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
             tasks = set()
 
             while time.monotonic() < deadline:
-                if len(tasks) < config.concurrency * 2:
-                    task = asyncio.create_task(
+                _top_up(
+                    tasks,
+                    config.concurrency,
+                    lambda: asyncio.create_task(
                         send_request(session, config, semaphore, rate_limiter)
-                    )
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
+                    ),
+                )
 
-                done, _ = await asyncio.wait(tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
-                for t in done:
-                    results.append(t.result())
+                done, tasks = await asyncio.wait(
+                    tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+                )
+                results.extend(t.result() for t in done)
 
             if tasks:
-                done, _ = await asyncio.wait(tasks, timeout=10)
-                for t in done:
-                    results.append(t.result())
+                done, pending = await asyncio.wait(tasks, timeout=10)
+                results.extend(t.result() for t in done)
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         else:
             tasks = [
                 send_request(session, config, semaphore, rate_limiter)
@@ -169,20 +183,14 @@ async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
     return results
 
 
-def save_results(results: list[RequestResult], output: Path):
-    data = [
-        {
-            "start_time": r.start_time,
-            "end_time": r.end_time,
-            "latency_ms": r.latency_ms,
-            "status": r.status,
-            "backend": r.backend,
-            "strategy": r.strategy,
-            "error": r.error,
-        }
-        for r in results
-    ]
-    output.write_text(json.dumps(data, indent=2))
+def results_to_dicts(results: list[RequestResult]) -> list[dict]:
+    return [asdict(r) for r in results]
+
+
+def save_results(results: list[RequestResult], output: Path, meta: dict | None = None) -> None:
+    payload = {"meta": meta or {}, "results": results_to_dicts(results)}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2))
     print(f"Saved {len(results)} results to {output}")
 
 
@@ -197,11 +205,11 @@ def print_summary(results: list[RequestResult]):
         return
 
     arr = np.array(latencies)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Benchmark Summary ({len(results)} total requests)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Successful: {len(latencies)}  Errors: {len(errors)}")
-    print(f"  Latency (ms):")
+    print("  Latency (ms):")
     print(f"    p50:  {np.percentile(arr, 50):.2f}")
     print(f"    p90:  {np.percentile(arr, 90):.2f}")
     print(f"    p95:  {np.percentile(arr, 95):.2f}")
@@ -216,21 +224,25 @@ def print_summary(results: list[RequestResult]):
             backends.setdefault(r.backend, []).append(r.latency_ms)
 
     if backends:
-        print(f"\n  Per-backend breakdown:")
+        print("\n  Per-backend breakdown:")
         for name, lats in sorted(backends.items()):
             ba = np.array(lats)
-            print(f"    {name}: n={len(lats)} p50={np.percentile(ba, 50):.1f}ms p99={np.percentile(ba, 99):.1f}ms")
+            print(
+                f"    {name}: n={len(lats)} p50={np.percentile(ba, 50):.1f}ms p99={np.percentile(ba, 99):.1f}ms"
+            )
 
     total_time = max(r.end_time for r in results) - min(r.start_time for r in results)
     print(f"\n  Throughput: {len(latencies) / total_time:.1f} req/s")
     print(f"  Total time: {total_time:.2f}s")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 def load_scenario(path: Path) -> BenchmarkConfig:
     with open(path) as f:
         data = yaml.safe_load(f)
-    return BenchmarkConfig(**{k: v for k, v in data.items() if k in BenchmarkConfig.__dataclass_fields__})
+    return BenchmarkConfig(
+        **{k: v for k, v in data.items() if k in BenchmarkConfig.__dataclass_fields__}
+    )
 
 
 def main():
@@ -238,10 +250,13 @@ def main():
     parser.add_argument("--url", default="http://localhost:8080", help="Router URL")
     parser.add_argument("--concurrency", type=int, default=50)
     parser.add_argument("--requests", type=int, default=1000)
-    parser.add_argument("--duration", type=float, default=0, help="Duration in seconds (overrides --requests)")
+    parser.add_argument(
+        "--duration", type=float, default=0, help="Duration in seconds (overrides --requests)"
+    )
     parser.add_argument("--rps", type=float, default=0, help="Requests per second limit")
     parser.add_argument("--strategy", default="round_robin")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--prefix-pool", type=int, default=0, help="Distinct system prompts")
     parser.add_argument("--scenario", type=Path, help="YAML scenario file")
     parser.add_argument("--output", type=Path, default=Path("results.json"))
     args = parser.parse_args()
@@ -257,11 +272,19 @@ def main():
             duration_secs=args.duration,
             strategy=args.strategy,
             stream=args.stream,
+            prefix_pool=args.prefix_pool,
         )
 
     print(f"Starting benchmark: {config.concurrency} concurrent, strategy={config.strategy}")
     results = asyncio.run(run_benchmark(config))
-    save_results(results, args.output)
+    save_results(
+        results,
+        args.output,
+        {
+            "strategy": config.strategy,
+            "scenario": args.scenario.stem if args.scenario else "cli",
+        },
+    )
     print_summary(results)
 
 

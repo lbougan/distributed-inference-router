@@ -31,8 +31,17 @@ pub struct RouterMetrics {
     pub active_connections: Family<BackendLabels, Gauge>,
     pub circuit_breaker_state: Family<BackendLabels, Gauge>,
     pub backend_health: Family<BackendLabels, Gauge>,
+    pub backend_queue_depth: Family<BackendLabels, Gauge>,
+    pub backend_kv_cache_usage: Family<BackendLabels, Gauge<f64, std::sync::atomic::AtomicU64>>,
     pub rejected_requests: Family<RejectLabels, Counter>,
+    pub in_flight: Gauge,
     pub registry: Arc<std::sync::Mutex<Registry>>,
+}
+
+impl Default for RouterMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RouterMetrics {
@@ -40,16 +49,16 @@ impl RouterMetrics {
         let mut registry = Registry::default();
 
         let requests_total = Family::<RequestLabels, Counter>::default();
+        // prometheus-client appends `_total` to counters: this exports `router_requests_total`.
         registry.register(
-            "router_requests_total",
+            "router_requests",
             "Total requests routed",
             requests_total.clone(),
         );
 
-        let request_duration =
-            Family::<BackendLabels, Histogram>::new_with_constructor(|| {
-                Histogram::new(exponential_buckets(0.001, 2.0, 15))
-            });
+        let request_duration = Family::<BackendLabels, Histogram>::new_with_constructor(|| {
+            Histogram::new(exponential_buckets(0.001, 2.0, 15))
+        });
         registry.register(
             "router_request_duration_seconds",
             "Request duration in seconds",
@@ -77,11 +86,33 @@ impl RouterMetrics {
             backend_health.clone(),
         );
 
+        let backend_queue_depth = Family::<BackendLabels, Gauge>::default();
+        registry.register(
+            "router_backend_queue_depth",
+            "Requests waiting in the backend queue (scraped)",
+            backend_queue_depth.clone(),
+        );
+
+        let backend_kv_cache_usage =
+            Family::<BackendLabels, Gauge<f64, std::sync::atomic::AtomicU64>>::default();
+        registry.register(
+            "router_backend_kv_cache_usage",
+            "Backend KV cache usage ratio 0..1 (scraped)",
+            backend_kv_cache_usage.clone(),
+        );
+
         let rejected_requests = Family::<RejectLabels, Counter>::default();
         registry.register(
-            "router_rejected_requests_total",
+            "router_rejected_requests",
             "Rejected requests by reason",
             rejected_requests.clone(),
+        );
+
+        let in_flight = Gauge::default();
+        registry.register(
+            "router_in_flight",
+            "Requests currently admitted by the router",
+            in_flight.clone(),
         );
 
         Self {
@@ -90,7 +121,10 @@ impl RouterMetrics {
             active_connections,
             circuit_breaker_state,
             backend_health,
+            backend_queue_depth,
+            backend_kv_cache_usage,
             rejected_requests,
+            in_flight,
             registry: Arc::new(std::sync::Mutex::new(registry)),
         }
     }

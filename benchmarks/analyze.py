@@ -6,37 +6,119 @@ Reads JSON result files and produces p50/p95/p99 latency comparisons.
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+START_MARK = "<!-- BENCH:START -->"
+END_MARK = "<!-- BENCH:END -->"
 
-def load_results(path: Path) -> list[dict]:
-    return json.loads(path.read_text())
+
+def load_run(path: Path) -> dict:
+    """Accept both the v0.1 bare list and the v0.2 {"meta", "results"} envelope."""
+    data = json.loads(path.read_text())
+    if isinstance(data, list):
+        return {
+            "meta": {"strategy": path.stem.replace("_results", ""), "scenario": "unknown"},
+            "results": data,
+        }
+    return data
 
 
 def compute_stats(results: list[dict]) -> dict:
-    latencies = [r["latency_ms"] for r in results if r["status"] == 200]
-    if not latencies:
-        return {"count": 0}
-
-    arr = np.array(latencies)
-    errors = [r for r in results if r["status"] != 200]
-    total_time = max(r["end_time"] for r in results) - min(r["start_time"] for r in results)
-
+    ok = [r for r in results if r["status"] == 200]
+    latencies = np.array([r["latency_ms"] for r in ok]) if ok else np.array([])
+    rejected = sum(1 for r in results if r["status"] == 429)
+    errors_5xx = sum(1 for r in results if 500 <= r["status"] < 600)
+    transport = sum(1 for r in results if r["status"] == 0)
+    if results:
+        total_time = max(r["end_time"] for r in results) - min(r["start_time"] for r in results)
+    else:
+        total_time = 0.0
+    shares: dict[str, float] = {}
+    if ok:
+        for r in ok:
+            shares[r["backend"]] = shares.get(r["backend"], 0) + 1
+        shares = {k: v / len(ok) for k, v in sorted(shares.items())}
+    if len(latencies) == 0:
+        return {
+            "count": 0,
+            "rejected_429": rejected,
+            "errors_5xx": errors_5xx,
+            "transport_errors": transport,
+            "p50": 0.0,
+            "p90": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "mean": 0.0,
+            "throughput": 0.0,
+            "backend_share": shares,
+        }
     return {
-        "count": len(latencies),
-        "errors": len(errors),
-        "p50": float(np.percentile(arr, 50)),
-        "p90": float(np.percentile(arr, 90)),
-        "p95": float(np.percentile(arr, 95)),
-        "p99": float(np.percentile(arr, 99)),
-        "mean": float(arr.mean()),
-        "min": float(arr.min()),
-        "max": float(arr.max()),
-        "throughput": len(latencies) / total_time if total_time > 0 else 0,
+        "count": len(ok),
+        "rejected_429": rejected,
+        "errors_5xx": errors_5xx,
+        "transport_errors": transport,
+        "p50": float(np.percentile(latencies, 50)),
+        "p90": float(np.percentile(latencies, 90)),
+        "p95": float(np.percentile(latencies, 95)),
+        "p99": float(np.percentile(latencies, 99)),
+        "mean": float(latencies.mean()),
+        "throughput": len(ok) / total_time if total_time > 0 else 0.0,
+        "backend_share": shares,
     }
+
+
+def markdown_table(runs: list[dict]) -> str:
+    header = (
+        "| scenario | strategy | ok | 429 | 5xx | p50 ms | p95 ms | p99 ms | req/s | backend share | prefix hit |\n"
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|\n"
+    )
+    rows = []
+    for run in runs:
+        s = compute_stats(run["results"])
+        share = ", ".join(
+            f"{k.rsplit('/', 1)[-1].split(':')[0]} {v:.0%}" for k, v in s["backend_share"].items()
+        )
+        if list(s["backend_share"]) == ["unknown"]:
+            share = "-"
+        phr = run["meta"].get("prefix_hit_rate_total")
+        hit = f"{phr:.0%}" if phr is not None else "-"
+        rows.append(
+            f"| {run['meta'].get('scenario', '?')} | {run['meta'].get('strategy', '?')} | {s['count']} "
+            f"| {s['rejected_429']} | {s['errors_5xx']} | {s['p50']:.1f} | {s['p95']:.1f} | {s['p99']:.1f} "
+            f"| {s['throughput']:.0f} | {share} | {hit} |"
+        )
+    return header + "\n".join(rows) + "\n"
+
+
+def resolve_commit(runs: list[dict]) -> str:
+    """Commit the runs were measured at (from their meta); fall back to the current checkout."""
+    commits = {r["meta"]["router_commit"] for r in runs if r["meta"].get("router_commit")}
+    if len(commits) > 1:
+        raise ValueError(f"runs disagree on router_commit: {sorted(commits)}")
+    if commits:
+        return commits.pop()
+    out = subprocess.run(
+        ["git", "describe", "--always", "--dirty"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    return out or "unknown"
+
+
+def update_readme(readme: Path, table: str, commit: str) -> None:
+    text = readme.read_text()
+    start = text.find(START_MARK)
+    end = text.find(END_MARK)
+    if start < 0 or end < 0 or end < start:
+        raise ValueError(f"{readme} needs {START_MARK} ... {END_MARK} in that order")
+    start += len(START_MARK)
+    block = (
+        f"\n_Generated by `uv run python -m benchmarks.run_matrix` at commit `{commit}` "
+        f"on the 3-mock compose stack (40/60/80 ms base latency)._\n\n{table}"
+    )
+    readme.write_text(text[:start] + block + text[end:])
 
 
 def plot_latency_comparison(all_stats: dict[str, dict], output: Path):
@@ -50,9 +132,15 @@ def plot_latency_comparison(all_stats: dict[str, dict], output: Path):
     for i, pctl in enumerate(percentiles):
         values = [all_stats[s].get(pctl, 0) for s in strategies]
         bars = ax.bar(x + i * width, values, width, label=pctl)
-        for bar, val in zip(bars, values):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                    f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+        for bar, val in zip(bars, values, strict=True):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.5,
+                f"{val:.1f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
 
     ax.set_xlabel("Routing Strategy")
     ax.set_ylabel("Latency (ms)")
@@ -72,10 +160,15 @@ def plot_throughput_comparison(all_stats: dict[str, dict], output: Path):
     throughputs = [all_stats[s].get("throughput", 0) for s in strategies]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    bars = ax.bar(strategies, throughputs, color=["#2196F3", "#4CAF50", "#FF9800", "#9C27B0"])
-    for bar, val in zip(bars, throughputs):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
-                f"{val:.1f}", ha="center", va="bottom")
+    bars = ax.bar(strategies, throughputs, color=plt.cm.tab10(np.arange(len(strategies)) % 10))
+    for bar, val in zip(bars, throughputs, strict=True):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 1,
+            f"{val:.1f}",
+            ha="center",
+            va="bottom",
+        )
 
     ax.set_xlabel("Routing Strategy")
     ax.set_ylabel("Throughput (req/s)")
@@ -99,8 +192,18 @@ def plot_latency_distribution(all_results: dict[str, list[dict]], output: Path):
             continue
         ax = axes[idx]
         ax.hist(latencies, bins=50, alpha=0.7, edgecolor="black", linewidth=0.5)
-        ax.axvline(np.percentile(latencies, 99), color="red", linestyle="--", label=f"p99={np.percentile(latencies, 99):.1f}ms")
-        ax.axvline(np.percentile(latencies, 50), color="green", linestyle="--", label=f"p50={np.percentile(latencies, 50):.1f}ms")
+        ax.axvline(
+            np.percentile(latencies, 99),
+            color="red",
+            linestyle="--",
+            label=f"p99={np.percentile(latencies, 99):.1f}ms",
+        )
+        ax.axvline(
+            np.percentile(latencies, 50),
+            color="green",
+            linestyle="--",
+            label=f"p50={np.percentile(latencies, 50):.1f}ms",
+        )
         ax.set_title(strategy)
         ax.set_xlabel("Latency (ms)")
         ax.set_ylabel("Count")
@@ -115,38 +218,42 @@ def plot_latency_distribution(all_results: dict[str, list[dict]], output: Path):
     print(f"Saved latency distribution to {output / 'latency_distribution.png'}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze benchmark results")
-    parser.add_argument("files", nargs="+", type=Path, help="Result JSON files (named strategy_results.json)")
-    parser.add_argument("--output", type=Path, default=Path("plots"), help="Output directory for plots")
+    parser.add_argument("files", nargs="+", type=Path, help="Result JSON files")
+    parser.add_argument(
+        "--output", type=Path, default=Path("benchmarks/plots"), help="Plot directory"
+    )
+    parser.add_argument("--markdown", action="store_true", help="Print a markdown table")
+    parser.add_argument("--update-readme", type=Path, help="Replace the BENCH block in this README")
+    parser.add_argument("--no-plots", action="store_true")
     args = parser.parse_args()
 
-    args.output.mkdir(parents=True, exist_ok=True)
-
-    all_results = {}
-    all_stats = {}
-
-    for f in args.files:
-        strategy = f.stem.replace("_results", "").replace("results_", "")
-        results = load_results(f)
-        if results:
-            strategy = results[0].get("strategy", strategy)
-        all_results[strategy] = results
-        all_stats[strategy] = compute_stats(results)
-
-    print("\nStrategy Comparison:")
-    print(f"{'Strategy':<20} {'Count':>8} {'Errors':>8} {'p50':>10} {'p95':>10} {'p99':>10} {'Throughput':>12}")
-    print("-" * 80)
-    for name, stats in all_stats.items():
-        if stats["count"] == 0:
-            print(f"{name:<20} {'no data':>8}")
-            continue
-        print(f"{name:<20} {stats['count']:>8} {stats['errors']:>8} {stats['p50']:>10.2f} {stats['p95']:>10.2f} {stats['p99']:>10.2f} {stats['throughput']:>10.1f}/s")
-
-    if len(all_stats) >= 1:
-        plot_latency_comparison(all_stats, args.output)
-        plot_throughput_comparison(all_stats, args.output)
-        plot_latency_distribution(all_results, args.output)
+    runs = [load_run(f) for f in args.files]
+    table = markdown_table(runs)
+    if args.markdown:
+        print(table)
+    else:
+        for run in runs:
+            s = compute_stats(run["results"])
+            print(
+                f"{run['meta'].get('scenario')}/{run['meta'].get('strategy')}: "
+                f"n={s['count']} p50={s['p50']:.1f} p95={s['p95']:.1f} "
+                f"p99={s['p99']:.1f} rps={s['throughput']:.0f}"
+            )
+    if args.update_readme:
+        commit = resolve_commit(runs)
+        update_readme(args.update_readme, table, commit)
+        print(f"Updated {args.update_readme}")
+    if not args.no_plots:
+        args.output.mkdir(parents=True, exist_ok=True)
+        by_label = {
+            f"{r['meta'].get('scenario')}/{r['meta'].get('strategy')}": r["results"] for r in runs
+        }
+        stats = {k: compute_stats(v) for k, v in by_label.items()}
+        plot_latency_comparison(stats, args.output)
+        plot_throughput_comparison(stats, args.output)
+        plot_latency_distribution(by_label, args.output)
 
 
 if __name__ == "__main__":

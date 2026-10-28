@@ -3,9 +3,12 @@ listen:
   port: 8080
 
 routing:
+  # round_robin | least_connections | least_load | latency_aware | prefix_cache
   strategy: "latency_aware"
   prefix_cache:
     prefix_token_count: 256
+  latency_aware:
+    alpha: 0.3
 
 backends:
   - url: "http://vllm-1:8000"
@@ -33,3 +36,9 @@ backpressure:
 metrics:
   enabled: true
   path: "/metrics"
+
+upstream:
+  # No total timeout: a stream may run as long as it keeps sending bytes.
+  connect_timeout_secs: 10
+  # Longest silence allowed from a backend (also the wait for response headers).
+  read_timeout_secs: 120

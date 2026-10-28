@@ -2,6 +2,7 @@
 name = "inference-router"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 
 [dependencies]
 axum = "0.7"
@@ -17,9 +18,7 @@ http-body-util = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }
-dashmap = "6"
 prometheus-client = "0.22"
-async-trait = "0.1"
 rand = "0.8"
 sha2 = "0.10"
 tower = { version = "0.5", features = ["limit", "timeout"] }

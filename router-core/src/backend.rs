@@ -1,18 +1,18 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::circuit_breaker::CircuitBreaker;
+
 pub type BackendId = usize;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct Backend {
     pub id: BackendId,
     pub url: String,
     pub weight: u32,
+    pub breaker: CircuitBreaker,
     pub healthy: AtomicBool,
     pub active_connections: AtomicUsize,
-    pub total_requests: AtomicU64,
-    pub total_failures: AtomicU64,
     /// EWMA latency in microseconds
     pub ewma_latency_us: AtomicU64,
     /// Queue depth scraped from backend /metrics
@@ -26,21 +26,25 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(id: BackendId, url: String, weight: u32) -> Self {
+    pub fn new(id: BackendId, url: String, weight: u32, breaker: CircuitBreaker) -> Self {
         Self {
             id,
             url,
             weight,
+            breaker,
             healthy: AtomicBool::new(true),
             active_connections: AtomicUsize::new(0),
-            total_requests: AtomicU64::new(0),
-            total_failures: AtomicU64::new(0),
             ewma_latency_us: AtomicU64::new(0),
             queue_depth: AtomicU64::new(0),
             kv_cache_usage_bp: AtomicU64::new(0),
             consecutive_health_failures: AtomicU64::new(0),
             consecutive_health_successes: AtomicU64::new(0),
         }
+    }
+
+    /// Healthy per active checks and the breaker lets traffic through.
+    pub fn is_routable(&self) -> bool {
+        self.is_healthy() && self.breaker.is_routable()
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -54,19 +58,16 @@ impl Backend {
 
     pub fn mark_unhealthy(&self) {
         self.healthy.store(false, Ordering::Relaxed);
-        self.consecutive_health_successes.store(0, Ordering::Relaxed);
+        self.consecutive_health_successes
+            .store(0, Ordering::Relaxed);
     }
 
     pub fn record_request_start(&self) {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_request_end(&self, success: bool) {
+    pub fn record_request_end(&self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
-        if !success {
-            self.total_failures.fetch_add(1, Ordering::Relaxed);
-        }
     }
 
     pub fn update_ewma_latency(&self, latency_us: u64, alpha: f64) {
@@ -84,22 +85,99 @@ impl Backend {
 
 pub struct BackendPool {
     pub backends: Vec<Arc<Backend>>,
+    /// Backends reporting more waiting requests than this are not routable.
+    pub max_queue_depth: u64,
 }
 
 impl BackendPool {
-    pub fn new(backends: Vec<Arc<Backend>>) -> Self {
-        Self { backends }
+    pub fn new(backends: Vec<Arc<Backend>>, max_queue_depth: u64) -> Self {
+        Self {
+            backends,
+            max_queue_depth,
+        }
     }
 
-    pub fn healthy_backends(&self) -> Vec<&Arc<Backend>> {
-        self.backends.iter().filter(|b| b.is_healthy()).collect()
-    }
-
-    pub fn get(&self, id: BackendId) -> Option<&Arc<Backend>> {
-        self.backends.get(id)
+    pub fn routable(&self) -> Vec<Arc<Backend>> {
+        let available: Vec<Arc<Backend>> = self
+            .backends
+            .iter()
+            .filter(|b| b.is_routable())
+            .cloned()
+            .collect();
+        let under_limit: Vec<Arc<Backend>> = available
+            .iter()
+            .filter(|b| b.queue_depth.load(Ordering::Relaxed) <= self.max_queue_depth)
+            .cloned()
+            .collect();
+        // Soft limit: when every live backend is over the queue limit they all stay routable and
+        // work queues on them; the in-flight budget, not the queue limit, bounds the router.
+        if under_limit.is_empty() {
+            available
+        } else {
+            under_limit
+        }
     }
 
     pub fn len(&self) -> usize {
         self.backends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.backends.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend(id: usize) -> Arc<Backend> {
+        Arc::new(Backend::new(
+            id,
+            format!("http://b{id}"),
+            1,
+            CircuitBreaker::default(),
+        ))
+    }
+
+    #[test]
+    fn routable_excludes_unhealthy_and_open_circuit() {
+        let pool = BackendPool::new(vec![backend(0), backend(1), backend(2)], 50);
+        pool.backends[1].mark_unhealthy();
+        let open = CircuitBreaker::new(0.5, 1, 60, 30);
+        open.record_failure(crate::circuit_breaker::Admission::Normal);
+        let b2 = Arc::new(Backend::new(2, "http://b2".into(), 1, open));
+        let pool = BackendPool::new(
+            vec![pool.backends[0].clone(), pool.backends[1].clone(), b2],
+            50,
+        );
+        let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![0]);
+    }
+
+    #[test]
+    fn routable_excludes_backends_over_queue_depth_limit() {
+        let pool = BackendPool::new(vec![backend(0), backend(1)], 50);
+        pool.backends[1].queue_depth.store(51, Ordering::Relaxed);
+        let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![0]);
+    }
+
+    #[test]
+    fn queue_limit_is_soft_when_every_backend_is_over_it() {
+        let pool = BackendPool::new(vec![backend(0), backend(1)], 50);
+        pool.backends[0].queue_depth.store(60, Ordering::Relaxed);
+        pool.backends[1].queue_depth.store(70, Ordering::Relaxed);
+        let ids: Vec<usize> = pool.routable().iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn ewma_first_sample_is_taken_as_is() {
+        let b = backend(0);
+        b.update_ewma_latency(1000, 0.3);
+        assert_eq!(b.ewma_latency_us.load(Ordering::Relaxed), 1000);
+        b.update_ewma_latency(2000, 0.5);
+        assert_eq!(b.ewma_latency_us.load(Ordering::Relaxed), 1500);
     }
 }

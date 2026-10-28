@@ -16,7 +16,9 @@ venv/
 
 # Benchmark outputs
 benchmarks/results*.json
+benchmarks/results/
 benchmarks/plots/
+benchmarks/.router-config.*.yaml
 
 # IDE
 .idea/
@@ -27,3 +29,8 @@ benchmarks/plots/
 # OS
 .DS_Store
 Thumbs.db
+
+# Working notes: every markdown file except the README stays local
+*.md
+!README.md
+docs/superpowers/

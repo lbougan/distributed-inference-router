@@ -1,8 +1,27 @@
+//! Admission control: a bounded number of in-flight requests, held as RAII permits.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 pub struct BackpressureController {
     in_flight: AtomicUsize,
     max_in_flight: usize,
+}
+
+/// A slot in the in-flight budget. Released when dropped, so every early return
+/// and every finished stream releases exactly once.
+pub struct Permit {
+    controller: Arc<BackpressureController>,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let result =
+            self.controller
+                .in_flight
+                .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| v.checked_sub(1));
+        debug_assert!(result.is_ok(), "permit released below zero");
+    }
 }
 
 impl BackpressureController {
@@ -13,28 +32,20 @@ impl BackpressureController {
         }
     }
 
-    /// Try to acquire a slot. Returns false if at capacity.
-    pub fn try_acquire(&self) -> bool {
-        loop {
-            let current = self.in_flight.load(Ordering::Relaxed);
-            if current >= self.max_in_flight {
-                return false;
-            }
-            if self
-                .in_flight
-                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                return true;
-            }
-        }
+    /// Try to take a slot. `None` means the router is at capacity (reply 429).
+    pub fn try_acquire(self: &Arc<Self>) -> Option<Permit> {
+        let acquired = self
+            .in_flight
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
+                (v < self.max_in_flight).then_some(v + 1)
+            })
+            .is_ok();
+        acquired.then(|| Permit {
+            controller: Arc::clone(self),
+        })
     }
 
-    pub fn release(&self) {
-        self.in_flight.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    pub fn current(&self) -> usize {
+    pub fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Relaxed)
     }
 }
@@ -45,29 +56,29 @@ mod tests {
 
     #[test]
     fn rejects_when_full() {
-        let bp = BackpressureController::new(2);
-        assert!(bp.try_acquire());
-        assert!(bp.try_acquire());
-        assert!(!bp.try_acquire());
+        let bp = Arc::new(BackpressureController::new(2));
+        let _a = bp.try_acquire().expect("slot 1");
+        let _b = bp.try_acquire().expect("slot 2");
+        assert!(bp.try_acquire().is_none());
     }
 
     #[test]
-    fn release_frees_slot() {
-        let bp = BackpressureController::new(1);
-        assert!(bp.try_acquire());
-        assert!(!bp.try_acquire());
-        bp.release();
-        assert!(bp.try_acquire());
+    fn dropping_permit_frees_slot() {
+        let bp = Arc::new(BackpressureController::new(1));
+        let a = bp.try_acquire().expect("slot");
+        assert!(bp.try_acquire().is_none());
+        drop(a);
+        assert!(bp.try_acquire().is_some());
     }
 
     #[test]
-    fn tracks_current() {
-        let bp = BackpressureController::new(10);
-        assert_eq!(bp.current(), 0);
-        bp.try_acquire();
-        bp.try_acquire();
-        assert_eq!(bp.current(), 2);
-        bp.release();
-        assert_eq!(bp.current(), 1);
+    fn tracks_in_flight() {
+        let bp = Arc::new(BackpressureController::new(10));
+        assert_eq!(bp.in_flight(), 0);
+        let a = bp.try_acquire().unwrap();
+        let _b = bp.try_acquire().unwrap();
+        assert_eq!(bp.in_flight(), 2);
+        drop(a);
+        assert_eq!(bp.in_flight(), 1);
     }
 }

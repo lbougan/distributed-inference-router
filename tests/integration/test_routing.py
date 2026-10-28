@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
 Integration tests for the inference router.
-Requires: router running on :8080, mock backends on :8001-8003.
+Requires the compose stack: router on :8080, mock backends on :8001-8003.
 
 Run with: pytest tests/integration/ -v
 """
 
 import asyncio
-import time
 
 import aiohttp
 import pytest
 
-ROUTER_URL = "http://localhost:8080"
-MOCK_URLS = [
-    "http://localhost:8001",
-    "http://localhost:8002",
-    "http://localhost:8003",
-]
+from tests.docker_helpers import ROUTER_BACKENDS, ROUTER_URL
+
+pytestmark = pytest.mark.docker
+
+BACKEND_HEADER = "x-router-backend"
 
 
 def make_chat_request(prompt: str = "Hello", stream: bool = False) -> dict:
@@ -29,14 +27,7 @@ def make_chat_request(prompt: str = "Hello", stream: bool = False) -> dict:
     }
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def session():
     async with aiohttp.ClientSession() as s:
         yield s
@@ -91,7 +82,9 @@ class TestBasicRouting:
         async with session.get(f"{ROUTER_URL}/metrics") as resp:
             assert resp.status == 200
             text = await resp.text()
-            assert "router_requests_total" in text
+            lines = text.splitlines()
+            assert any(line.startswith("router_requests_total{") for line in lines)
+            assert "_total_total" not in text
 
 
 class TestLoadDistribution:
@@ -105,9 +98,9 @@ class TestLoadDistribution:
                 json=make_chat_request(),
             ) as resp:
                 assert resp.status == 200
-                backend = resp.headers.get("X-Backend-ID", "")
-                if backend:
-                    backends_seen.add(backend)
+                backend = resp.headers.get(BACKEND_HEADER, "")
+                assert backend in ROUTER_BACKENDS, backend
+                backends_seen.add(backend)
 
         assert len(backends_seen) >= 2, f"Expected requests on >= 2 backends, got {backends_seen}"
 
@@ -143,9 +136,9 @@ class TestPrefixCacheRouting:
                 f"{ROUTER_URL}/v1/chat/completions",
                 json=make_chat_request(prompt=prompt),
             ) as resp:
-                backend = resp.headers.get("X-Backend-ID", "")
-                backends.append(backend)
+                assert resp.status == 200
+                backends.append(resp.headers.get(BACKEND_HEADER, ""))
 
         # All should go to the same backend (if prefix_cache strategy is active)
         # If round_robin is active this test just verifies no errors
-        assert all(b != "" for b in backends), "All responses should have X-Backend-ID"
+        assert all(b in ROUTER_BACKENDS for b in backends), f"missing {BACKEND_HEADER}: {backends}"
