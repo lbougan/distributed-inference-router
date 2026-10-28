@@ -9,7 +9,7 @@ import asyncio
 import json
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import aiohttp
@@ -36,6 +36,7 @@ class BenchmarkConfig:
     duration_secs: float = 0.0  # 0 = use total_requests instead
     strategy: str = "round_robin"
     stream: bool = False
+    prefix_pool: int = 0  # distinct system prompts; 0 = the single default
     prompt_pool: list[str] = field(
         default_factory=lambda: [
             "Explain quantum computing in simple terms.",
@@ -52,11 +53,6 @@ class BenchmarkConfig:
     )
 
 
-SAMPLE_MESSAGES = [
-    {"role": "system", "content": "You are a helpful assistant."},
-]
-
-
 async def send_request(
     session: aiohttp.ClientSession,
     config: BenchmarkConfig,
@@ -64,9 +60,12 @@ async def send_request(
     rate_limiter: asyncio.Semaphore | None,
 ) -> RequestResult:
     prompt = random.choice(config.prompt_pool)
+    system = "You are a helpful assistant."
+    if config.prefix_pool > 0:
+        system = f"You are assistant variant {random.randrange(config.prefix_pool)}. Be concise."
     body = {
         "model": "mock-model",
-        "messages": SAMPLE_MESSAGES + [{"role": "user", "content": prompt}],
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
         "max_tokens": 50,
         "stream": config.stream,
     }
@@ -89,7 +88,7 @@ async def send_request(
                     await resp.read()
 
                 end = time.monotonic()
-                backend = resp.headers.get("X-Backend-ID", "unknown")
+                backend = resp.headers.get("x-router-backend", "unknown")
                 return RequestResult(
                     start_time=start,
                     end_time=end,
@@ -170,20 +169,14 @@ async def run_benchmark(config: BenchmarkConfig) -> list[RequestResult]:
     return results
 
 
-def save_results(results: list[RequestResult], output: Path):
-    data = [
-        {
-            "start_time": r.start_time,
-            "end_time": r.end_time,
-            "latency_ms": r.latency_ms,
-            "status": r.status,
-            "backend": r.backend,
-            "strategy": r.strategy,
-            "error": r.error,
-        }
-        for r in results
-    ]
-    output.write_text(json.dumps(data, indent=2))
+def results_to_dicts(results: list[RequestResult]) -> list[dict]:
+    return [asdict(r) for r in results]
+
+
+def save_results(results: list[RequestResult], output: Path, meta: dict | None = None) -> None:
+    payload = {"meta": meta or {}, "results": results_to_dicts(results)}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2))
     print(f"Saved {len(results)} results to {output}")
 
 
@@ -249,6 +242,7 @@ def main():
     parser.add_argument("--rps", type=float, default=0, help="Requests per second limit")
     parser.add_argument("--strategy", default="round_robin")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--prefix-pool", type=int, default=0, help="Distinct system prompts")
     parser.add_argument("--scenario", type=Path, help="YAML scenario file")
     parser.add_argument("--output", type=Path, default=Path("results.json"))
     args = parser.parse_args()
@@ -264,11 +258,19 @@ def main():
             duration_secs=args.duration,
             strategy=args.strategy,
             stream=args.stream,
+            prefix_pool=args.prefix_pool,
         )
 
     print(f"Starting benchmark: {config.concurrency} concurrent, strategy={config.strategy}")
     results = asyncio.run(run_benchmark(config))
-    save_results(results, args.output)
+    save_results(
+        results,
+        args.output,
+        {
+            "strategy": config.strategy,
+            "scenario": args.scenario.stem if args.scenario else "cli",
+        },
+    )
     print_summary(results)
 
 

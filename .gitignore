@@ -16,7 +16,9 @@ venv/
 
 # Benchmark outputs
 benchmarks/results*.json
+benchmarks/results/
 benchmarks/plots/
+benchmarks/.router-config.*.yaml
 
 # IDE
 .idea/
